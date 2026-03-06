@@ -2,17 +2,20 @@
 
 <script setup>
 import { ref, onMounted, watch, computed } from 'vue'
+import { useTheme } from 'vuetify'
 import { useAuthStore } from '@/stores/auth'
 import { useToast } from '@/composables/useToast'
 import api from '@/services/api'
 
 const authStore = useAuthStore()
 const { success: toastSuccess, error: toastError } = useToast()
+const vuetifyTheme = useTheme()
+const isDark = computed(() => vuetifyTheme.global.current.value.dark)
 
 // Permissions
-const canCreate = computed(() => authStore.hasPermission('user.create'))
-const canEdit = computed(() => authStore.hasPermission('user.edit'))
-const canDelete = computed(() => authStore.hasPermission('user.delete'))
+const canCreate = computed(() => authStore.hasPermission('users.create'))
+const canEdit = computed(() => authStore.hasPermission('users.update'))
+const canDelete = computed(() => authStore.hasPermission('users.delete'))
 
 // Data
 const users = ref([])
@@ -51,12 +54,30 @@ const selectedUser = ref(null)
 const newPassword = ref('')
 
 // Stats
-const stats = computed(() => ({
-  total: totalUsers.value,
-  active: users.value.filter(u => u.is_active).length,
-  inactive: users.value.filter(u => !u.is_active).length,
-  admins: users.value.filter(u => u.roles?.some(r => r.name?.toLowerCase().includes('admin'))).length,
-}))
+const serverStats = ref(null)
+const stats = computed(() => {
+  if (serverStats.value) {
+    const adminRole = serverStats.value.roles_breakdown?.find(r => r.slug === 'admin')
+    return {
+      total: serverStats.value.total_users || 0,
+      active: serverStats.value.active_users || 0,
+      inactive: serverStats.value.inactive_users || 0,
+      admins: adminRole?.user_count || 0,
+    }
+  }
+  return { total: totalUsers.value, active: 0, inactive: 0, admins: 0 }
+})
+
+const fetchStats = async () => {
+  try {
+    const response = await api.get('/admin-api/users/stats')
+    if (response.data.success) {
+      serverStats.value = response.data.data
+    }
+  } catch (error) {
+    // Stats are non-critical
+  }
+}
 
 // Fetch users
 const fetchUsers = async () => {
@@ -69,16 +90,16 @@ const fetchUsers = async () => {
     })
     
     if (search.value) params.append('search', search.value)
-    if (filterRole.value) params.append('role_id', filterRole.value)
+    if (filterRole.value) params.append('role', filterRole.value)
     if (filterStatus.value !== null && filterStatus.value !== '') {
       params.append('is_active', filterStatus.value)
     }
     
-    const response = await api.get(`/admins/users?${params}`)
+    const response = await api.get(`/admin-api/users?${params}`)
     
     if (response.data.success) {
-      users.value = response.data.data || []
-      totalUsers.value = response.data.meta?.total || response.data.data?.length || 0
+      users.value = response.data.data?.users || []
+      totalUsers.value = response.data.data?.pagination?.total || 0
     }
   } catch (error) {
     console.error('Failed to fetch users:', error)
@@ -91,9 +112,9 @@ const fetchUsers = async () => {
 // Fetch roles for dropdown
 const fetchRoles = async () => {
   try {
-    const response = await api.get('/admins/roles')
+    const response = await api.get('/admin-api/roles')
     if (response.data.success) {
-      roles.value = response.data.data || []
+      roles.value = response.data.data?.roles || response.data.data || []
     }
   } catch (error) {
     console.error('Failed to fetch roles:', error)
@@ -117,13 +138,23 @@ const handleCreate = async () => {
   dialogLoading.value = true
   
   try {
-    const response = await api.post('/admins/users/create', form.value)
+    const payload = {
+      email: form.value.email,
+      first_name: form.value.first_name,
+      last_name: form.value.last_name,
+      password: form.value.password,
+      phone: form.value.phone || '',
+    }
+    if (form.value.role_ids?.length) payload.role_id = form.value.role_ids[0]
+
+    const response = await api.post('/admin-api/users/create', payload)
     
     if (response.data.success) {
       toastSuccess('User created successfully')
       showCreateDialog.value = false
       resetForm()
       fetchUsers()
+      fetchStats()
     }
   } catch (error) {
     // Handled by interceptor
@@ -145,18 +176,35 @@ const handleUpdate = async () => {
   dialogLoading.value = true
   
   try {
-    await api.put(`/admins/users/${selectedUser.value.id}/update`, {
+    await api.put(`/admin-api/users/${selectedUser.value.id}/update`, {
       email: form.value.email,
       first_name: form.value.first_name,
       last_name: form.value.last_name,
-      middle_name: form.value.middle_name || null,
+      phone: form.value.phone || '',
       is_active: form.value.is_active,
     })
-    
-    await api.put(`/admins/users/${selectedUser.value.id}/roles`, {
-      role_ids: form.value.role_ids,
-    })
-    
+
+    // Sync roles: compare old vs new
+    // selectedUser.roles is an array of slugs from the list endpoint
+    const oldRoleIds = (selectedUser.value.roles || [])
+      .map(slug => roles.value.find(r => r.slug === slug)?.id)
+      .filter(Boolean)
+    const newRoleIds = form.value.role_ids || []
+
+    // Assign new roles
+    for (const roleId of newRoleIds) {
+      if (!oldRoleIds.includes(roleId)) {
+        await api.post(`/admin-api/users/${selectedUser.value.id}/roles`, { role_id: roleId })
+      }
+    }
+
+    // Remove old roles
+    for (const roleId of oldRoleIds) {
+      if (!newRoleIds.includes(roleId)) {
+        await api.delete(`/admin-api/users/${selectedUser.value.id}/roles/remove`, { data: { role_id: roleId } })
+      }
+    }
+
     toastSuccess('User updated successfully')
     showEditDialog.value = false
     resetForm()
@@ -175,13 +223,14 @@ const handleDelete = async () => {
   dialogLoading.value = true
   
   try {
-    const response = await api.delete(`/admins/users/${selectedUser.value.id}/delete`)
+    const response = await api.delete(`/admin-api/users/${selectedUser.value.id}/delete`)
     
     if (response.data.success) {
       toastSuccess('User deleted successfully')
       showDeleteDialog.value = false
       selectedUser.value = null
       fetchUsers()
+      fetchStats()
     }
   } catch (error) {
     // Handled by interceptor
@@ -200,8 +249,8 @@ const handleChangePassword = async () => {
   dialogLoading.value = true
   
   try {
-    const response = await api.put(`/admins/users/${selectedUser.value.id}/password`, {
-      password: newPassword.value,
+    const response = await api.post(`/admin-api/users/${selectedUser.value.id}/change-password`, {
+      new_password: newPassword.value,
     })
     
     if (response.data.success) {
@@ -220,13 +269,19 @@ const handleChangePassword = async () => {
 // Open edit dialog
 const openEditDialog = (user) => {
   selectedUser.value = user
+  // user.roles from list is an array of slugs like ["admin", "driver"]
+  // Map slugs to IDs using the fetched roles list
+  const roleIds = (user.roles || [])
+    .map(slug => roles.value.find(r => r.slug === slug)?.id)
+    .filter(Boolean)
+
   form.value = {
     email: user.email,
     password: '',
     first_name: user.first_name,
     last_name: user.last_name,
-    middle_name: user.middle_name || '',
-    role_ids: user.roles?.map(r => r.id) || [],
+    middle_name: '',
+    role_ids: roleIds,
     is_active: user.is_active,
   }
   showEditDialog.value = true
@@ -314,11 +369,12 @@ watch(page, () => {
 onMounted(() => {
   fetchUsers()
   fetchRoles()
+  fetchStats()
 })
 </script>
 
 <template>
-  <div class="users-page">
+  <div class="users-page" :class="{ 'theme-light': !isDark }">
     <!-- Animated Background -->
     <div class="page-bg">
       <div class="bg-gradient"></div>
@@ -429,7 +485,7 @@ onMounted(() => {
             v-model="filterRole"
             :items="roles"
             item-title="name"
-            item-value="id"
+            item-value="slug"
             placeholder="All Roles"
             variant="outlined"
             density="comfortable"
@@ -570,15 +626,15 @@ onMounted(() => {
             <template v-if="user.roles?.length">
               <span
                 v-for="role in user.roles"
-                :key="role.id"
+                :key="role"
                 class="role-badge"
                 :style="{
-                  background: getRoleColor(role.name).bg,
-                  color: getRoleColor(role.name).text,
-                  borderColor: getRoleColor(role.name).border,
+                  background: getRoleColor(role).bg,
+                  color: getRoleColor(role).text,
+                  borderColor: getRoleColor(role).border,
                 }"
               >
-                {{ role.name }}
+                {{ role }}
               </span>
             </template>
             <span v-else class="no-roles">No roles assigned</span>
@@ -996,18 +1052,63 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* CSS Variables */
-:root {
+/* Theme Variables */
+.users-page {
   --primary: #6366f1;
   --primary-light: #818cf8;
   --primary-dark: #4f46e5;
   --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;
-  --surface: #1e1e2e;
-  --surface-light: #2a2a3e;
-  --text: #e2e8f0;
+  --card-bg: rgba(30, 30, 46, 0.7);
+  --card-bg-subtle: rgba(255, 255, 255, 0.03);
+  --card-border: rgba(255, 255, 255, 0.08);
+  --card-border-hover: rgba(255, 255, 255, 0.15);
+  --surface-bg: rgba(30, 30, 46, 0.5);
+  --dialog-bg: #1e1e2e;
+  --dialog-border: rgba(255, 255, 255, 0.1);
+  --dialog-footer-bg: rgba(0, 0, 0, 0.2);
+  --input-bg: rgba(255, 255, 255, 0.05);
+  --hover-bg: rgba(255, 255, 255, 0.05);
+  --hover-bg-strong: rgba(255, 255, 255, 0.1);
+  --text-heading: #f8fafc;
+  --text-body: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --border-line: rgba(255, 255, 255, 0.06);
+  --status-ring: #1e1e2e;
+  --grad-base-start: #0f0f1a;
+  --grad-base-end: #1a1a2e;
+  --grid-line: rgba(255, 255, 255, 0.02);
+  --shape-opacity: 0.4;
+  --shadow-card: 0 8px 24px rgba(0, 0, 0, 0.2);
+  --shadow-btn: 0 8px 32px rgba(99, 102, 241, 0.35);
+}
+
+.users-page.theme-light {
+  --card-bg: rgba(255, 255, 255, 0.9);
+  --card-bg-subtle: rgba(0, 0, 0, 0.02);
+  --card-border: rgba(0, 0, 0, 0.08);
+  --card-border-hover: rgba(0, 0, 0, 0.14);
+  --surface-bg: rgba(255, 255, 255, 0.8);
+  --dialog-bg: #ffffff;
+  --dialog-border: rgba(0, 0, 0, 0.1);
+  --dialog-footer-bg: rgba(0, 0, 0, 0.03);
+  --input-bg: rgba(0, 0, 0, 0.03);
+  --hover-bg: rgba(0, 0, 0, 0.04);
+  --hover-bg-strong: rgba(0, 0, 0, 0.08);
+  --text-heading: #1e293b;
+  --text-body: #334155;
+  --text-secondary: #64748b;
   --text-muted: #94a3b8;
+  --border-line: rgba(0, 0, 0, 0.06);
+  --status-ring: #ffffff;
+  --grad-base-start: #f8f9fe;
+  --grad-base-end: #f1f3f9;
+  --grid-line: rgba(0, 0, 0, 0.03);
+  --shape-opacity: 0.12;
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.06);
+  --shadow-btn: 0 8px 32px rgba(99, 102, 241, 0.2);
 }
 
 /* Page Layout */
@@ -1029,19 +1130,19 @@ onMounted(() => {
 .bg-gradient {
   position: absolute;
   inset: 0;
-  background: 
+  background:
     radial-gradient(ellipse at 0% 0%, rgba(99, 102, 241, 0.15) 0%, transparent 50%),
     radial-gradient(ellipse at 100% 0%, rgba(139, 92, 246, 0.1) 0%, transparent 50%),
     radial-gradient(ellipse at 50% 100%, rgba(16, 185, 129, 0.08) 0%, transparent 50%),
-    linear-gradient(180deg, #0f0f1a 0%, #1a1a2e 100%);
+    linear-gradient(180deg, var(--grad-base-start) 0%, var(--grad-base-end) 100%);
 }
 
 .bg-grid {
   position: absolute;
   inset: 0;
-  background-image: 
-    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
   background-size: 60px 60px;
   mask-image: radial-gradient(ellipse at center, black 30%, transparent 70%);
 }
@@ -1056,7 +1157,7 @@ onMounted(() => {
   position: absolute;
   border-radius: 50%;
   filter: blur(100px);
-  opacity: 0.4;
+  opacity: var(--shape-opacity);
   animation: float 20s ease-in-out infinite;
 }
 
@@ -1128,14 +1229,14 @@ onMounted(() => {
 .page-title {
   font-size: 32px;
   font-weight: 700;
-  color: #f8fafc;
+  color: var(--text-heading);
   margin: 0;
   letter-spacing: -0.5px;
 }
 
 .page-subtitle {
   font-size: 15px;
-  color: #94a3b8;
+  color: var(--text-secondary);
   margin: 4px 0 0;
 }
 
@@ -1146,7 +1247,7 @@ onMounted(() => {
   padding: 0 28px !important;
   height: 48px !important;
   border-radius: 14px !important;
-  box-shadow: 0 8px 32px rgba(99, 102, 241, 0.35);
+  box-shadow: var(--shadow-btn);
   transition: all 0.3s ease;
 }
 
@@ -1165,9 +1266,9 @@ onMounted(() => {
 
 .stat-card {
   position: relative;
-  background: rgba(30, 30, 46, 0.7);
+  background: var(--card-bg);
   backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--card-border);
   border-radius: 20px;
   padding: 24px;
   display: flex;
@@ -1179,7 +1280,7 @@ onMounted(() => {
 
 .stat-card:hover {
   transform: translateY(-4px);
-  border-color: rgba(255, 255, 255, 0.15);
+  border-color: var(--card-border-hover);
 }
 
 .stat-icon {
@@ -1194,7 +1295,7 @@ onMounted(() => {
 
 .stat-total .stat-icon {
   background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(139, 92, 246, 0.2));
-  color: #818cf8;
+  color: var(--primary-light);
 }
 
 .stat-active .stat-icon {
@@ -1220,13 +1321,13 @@ onMounted(() => {
 .stat-value {
   font-size: 28px;
   font-weight: 700;
-  color: #f8fafc;
+  color: var(--text-heading);
   line-height: 1;
 }
 
 .stat-label {
   font-size: 13px;
-  color: #94a3b8;
+  color: var(--text-secondary);
   margin-top: 4px;
 }
 
@@ -1258,9 +1359,9 @@ onMounted(() => {
 
 /* Filters */
 .filters-card {
-  background: rgba(30, 30, 46, 0.7);
+  background: var(--card-bg);
   backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--card-border);
   border-radius: 20px;
   padding: 20px;
   margin-bottom: 28px;
@@ -1272,12 +1373,12 @@ onMounted(() => {
   gap: 8px;
   font-size: 14px;
   font-weight: 600;
-  color: #94a3b8;
+  color: var(--text-secondary);
   margin-bottom: 16px;
 }
 
 .filter-icon {
-  color: #818cf8;
+  color: var(--primary-light);
 }
 
 .filters-body {
@@ -1297,16 +1398,16 @@ onMounted(() => {
 }
 
 .search-input :deep(.v-field) {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--input-bg);
   border-radius: 12px;
 }
 
 .search-icon {
-  color: #94a3b8;
+  color: var(--text-secondary);
 }
 
 .filter-select :deep(.v-field) {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--input-bg);
   border-radius: 12px;
 }
 
@@ -1318,9 +1419,9 @@ onMounted(() => {
 
 /* Users Container */
 .users-container {
-  background: rgba(30, 30, 46, 0.5);
+  background: var(--surface-bg);
   backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--card-border);
   border-radius: 24px;
   padding: 24px;
   min-height: 400px;
@@ -1333,7 +1434,7 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   padding: 80px 20px;
-  color: #94a3b8;
+  color: var(--text-secondary);
 }
 
 .loading-spinner {
@@ -1371,19 +1472,19 @@ onMounted(() => {
   justify-content: center;
   background: rgba(99, 102, 241, 0.1);
   border-radius: 24px;
-  color: #818cf8;
+  color: var(--primary-light);
   margin-bottom: 24px;
 }
 
 .empty-state h3 {
   font-size: 22px;
   font-weight: 600;
-  color: #f8fafc;
+  color: var(--text-heading);
   margin: 0 0 8px;
 }
 
 .empty-state p {
-  color: #94a3b8;
+  color: var(--text-secondary);
   margin: 0;
 }
 
@@ -1397,8 +1498,8 @@ onMounted(() => {
 /* User Card */
 .user-card {
   position: relative;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--card-bg-subtle);
+  border: 1px solid var(--card-border);
   border-radius: 20px;
   padding: 24px;
   transition: all 0.3s ease;
@@ -1416,7 +1517,7 @@ onMounted(() => {
 }
 
 .user-card:hover {
-  border-color: rgba(99, 102, 241, 0.3);
+  border-color: var(--card-glow-border, rgba(99, 102, 241, 0.3));
   transform: translateY(-4px);
 }
 
@@ -1452,7 +1553,7 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-card);
 }
 
 .user-avatar span {
@@ -1469,7 +1570,7 @@ onMounted(() => {
   width: 16px;
   height: 16px;
   background: #ef4444;
-  border: 3px solid #1e1e2e;
+  border: 3px solid var(--status-ring);
   border-radius: 50%;
 }
 
@@ -1485,7 +1586,7 @@ onMounted(() => {
 .user-name {
   font-size: 17px;
   font-weight: 600;
-  color: #f8fafc;
+  color: var(--text-heading);
   margin: 0;
   white-space: nowrap;
   overflow: hidden;
@@ -1494,7 +1595,7 @@ onMounted(() => {
 
 .user-email {
   font-size: 14px;
-  color: #94a3b8;
+  color: var(--text-secondary);
   margin: 2px 0 0;
   white-space: nowrap;
   overflow: hidden;
@@ -1503,24 +1604,24 @@ onMounted(() => {
 
 .user-middle {
   font-size: 13px;
-  color: #64748b;
+  color: var(--text-muted);
   margin: 2px 0 0;
 }
 
 .menu-btn {
-  color: #64748b !important;
+  color: var(--text-muted) !important;
   margin: -8px -8px 0 0;
 }
 
 .menu-btn:hover {
-  color: #f8fafc !important;
-  background: rgba(255, 255, 255, 0.1) !important;
+  color: var(--text-heading) !important;
+  background: var(--hover-bg-strong) !important;
 }
 
 /* Action Menu */
 .action-menu {
-  background: #1e1e2e !important;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--dialog-bg) !important;
+  border: 1px solid var(--dialog-border);
   border-radius: 12px !important;
   padding: 8px !important;
   min-width: 180px;
@@ -1532,12 +1633,12 @@ onMounted(() => {
 }
 
 .action-menu :deep(.v-list-item:hover) {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--input-bg);
 }
 
 .delete-item {
   margin-top: 4px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--card-border);
   padding-top: 4px;
 }
 
@@ -1561,7 +1662,7 @@ onMounted(() => {
 
 .no-roles {
   font-size: 13px;
-  color: #64748b;
+  color: var(--text-muted);
   font-style: italic;
 }
 
@@ -1571,7 +1672,7 @@ onMounted(() => {
   justify-content: space-between;
   align-items: center;
   padding-top: 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--border-line);
 }
 
 .footer-item {
@@ -1579,7 +1680,7 @@ onMounted(() => {
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  color: #64748b;
+  color: var(--text-muted);
 }
 
 .status-badge {
@@ -1612,7 +1713,7 @@ onMounted(() => {
   gap: 8px;
   margin-top: 16px;
   padding-top: 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--border-line);
 }
 
 /* Pagination */
@@ -1622,18 +1723,19 @@ onMounted(() => {
   align-items: center;
   margin-top: 28px;
   padding-top: 20px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--border-line);
   flex-wrap: wrap;
   gap: 16px;
 }
 
 .pagination-info {
   font-size: 14px;
-  color: #94a3b8;
+  color: var(--text-secondary);
 }
 
 .pagination-info strong {
-  color: #f8fafc;
+  color: var(--text-heading);
+  font-weight: 600;
 }
 
 .pagination-controls {
@@ -1667,7 +1769,7 @@ onMounted(() => {
 }
 
 .page-ellipsis {
-  color: #64748b;
+  color: var(--text-muted);
   padding: 0 8px;
 }
 
@@ -1677,8 +1779,8 @@ onMounted(() => {
 }
 
 .dialog-card {
-  background: #1e1e2e !important;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--dialog-bg) !important;
+  border: 1px solid var(--dialog-border);
   border-radius: 24px !important;
   overflow: hidden;
 }
@@ -1708,7 +1810,7 @@ onMounted(() => {
 
 .dialog-icon.edit {
   background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(139, 92, 246, 0.2));
-  color: #818cf8;
+  color: var(--primary-light);
 }
 
 .dialog-icon.warning {
@@ -1719,13 +1821,13 @@ onMounted(() => {
 .dialog-title {
   font-size: 22px;
   font-weight: 700;
-  color: #f8fafc;
+  color: var(--text-heading);
   margin: 0;
 }
 
 .dialog-subtitle {
   font-size: 14px;
-  color: #94a3b8;
+  color: var(--text-secondary);
   margin: 4px 0 0;
 }
 
@@ -1733,7 +1835,7 @@ onMounted(() => {
   position: absolute !important;
   right: 16px;
   top: 16px;
-  color: #64748b !important;
+  color: var(--text-muted) !important;
 }
 
 .dialog-body {
@@ -1759,7 +1861,7 @@ onMounted(() => {
 .form-label {
   font-size: 14px;
   font-weight: 600;
-  color: #e2e8f0;
+  color: var(--text-body);
 }
 
 .form-label .required {
@@ -1767,7 +1869,7 @@ onMounted(() => {
 }
 
 .form-group :deep(.v-field) {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--input-bg);
   border-radius: 12px;
 }
 
@@ -1775,8 +1877,8 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--card-bg-subtle);
+  border: 1px solid var(--card-border);
   border-radius: 14px;
   padding: 16px;
 }
@@ -1788,19 +1890,19 @@ onMounted(() => {
 }
 
 .switch-icon {
-  color: #818cf8;
+  color: var(--primary-light);
 }
 
 .switch-label {
   font-size: 15px;
   font-weight: 600;
-  color: #f8fafc;
+  color: var(--text-heading);
   display: block;
 }
 
 .switch-desc {
   font-size: 13px;
-  color: #64748b;
+  color: var(--text-muted);
   display: block;
   margin-top: 2px;
 }
@@ -1810,7 +1912,7 @@ onMounted(() => {
   justify-content: flex-end;
   gap: 12px;
   padding: 20px 24px;
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--dialog-footer-bg);
 }
 
 .submit-btn {
@@ -1847,18 +1949,18 @@ onMounted(() => {
 .delete-title {
   font-size: 24px;
   font-weight: 700;
-  color: #f8fafc;
+  color: var(--text-heading);
   margin: 0 0 12px;
 }
 
 .delete-message {
   font-size: 16px;
-  color: #94a3b8;
+  color: var(--text-secondary);
   margin: 0 0 16px;
 }
 
 .delete-message strong {
-  color: #f8fafc;
+  color: var(--text-heading);
 }
 
 .delete-warning {

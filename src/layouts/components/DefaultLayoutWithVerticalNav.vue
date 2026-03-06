@@ -2,7 +2,6 @@
 
 <script setup>
 import { computed } from 'vue'
-import { useTheme } from 'vuetify'
 import { useAuthStore } from '@/stores/auth'
 import VerticalNavSectionTitle from '@/@layouts/components/VerticalNavSectionTitle.vue'
 import VerticalNavLayout from '@layouts/components/VerticalNavLayout.vue'
@@ -13,7 +12,6 @@ import Footer from '@/layouts/components/Footer.vue'
 import NavbarThemeSwitcher from '@/layouts/components/NavbarThemeSwitcher.vue'
 import UserProfile from '@/layouts/components/UserProfile.vue'
 
-const vuetifyTheme = useTheme()
 const authStore = useAuthStore()
 
 // Helper to check permission
@@ -25,19 +23,13 @@ const can = (permission) => {
   return authStore.hasPermission(permission)
 }
 
-// Navigation items with permissions
+// Navigation items
 const navItems = computed(() => [
   {
     title: 'Dashboard',
     icon: 'bx-home',
     to: '/dashboard',
-    permission: null, // Everyone
-  },
-  {
-    title: 'Account Settings',
-    icon: 'bx-cog',
-    to: '/account-settings',
-    permission: null, // Everyone
+    permission: null,
   },
 ])
 
@@ -47,52 +39,11 @@ const managementItems = computed(() => [
     title: 'Users',
     icon: 'bx-user',
     to: '/users',
-    permission: 'user.view',
-  },
-  {
-    title: 'Teachers',
-    icon: 'bx-chalkboard',
-    to: '/teachers',
-    permission: 'user.view',
-  },
-  {
-    title: 'Groups',
-    icon: 'bx-group',
-    to: '/groups',
-    permission: 'group.view',
-  },
-  {
-    title: 'Students',
-    icon: 'bx-user-check',
-    to: '/students',
-    permission: 'student.view',
+    permission: 'users.view',
   },
 ].filter(item => can(item.permission)))
 
-// Attendance section items
-const attendanceItems = computed(() => [
-  {
-    title: 'Attendance',
-    icon: 'bx-calendar-check',
-    to: '/attendance',
-    permission: 'attendance.view',
-  },
-].filter(item => can(item.permission)))
-
-// Settings section items
-const settingsItems = computed(() => [
-  {
-    title: 'Roles & Permissions',
-    icon: 'bx-shield',
-    to: '/roles',
-    permission: 'role.view',
-  },
-].filter(item => can(item.permission)))
-
-// Check if sections should be visible
 const showManagementSection = computed(() => managementItems.value.length > 0)
-const showAttendanceSection = computed(() => attendanceItems.value.length > 0)
-const showSettingsSection = computed(() => settingsItems.value.length > 0)
 </script>
 
 <template>
@@ -143,30 +94,6 @@ const showSettingsSection = computed(() => settingsItems.value.length > 0)
         />
         <VerticalNavLink
           v-for="item in managementItems"
-          :key="item.title"
-          :item="item"
-        />
-      </template>
-
-      <!-- Attendance Section -->
-      <template v-if="showAttendanceSection">
-        <VerticalNavSectionTitle
-          :item="{ heading: 'Attendance' }"
-        />
-        <VerticalNavLink
-          v-for="item in attendanceItems"
-          :key="item.title"
-          :item="item"
-        />
-      </template>
-
-      <!-- Settings Section -->
-      <template v-if="showSettingsSection">
-        <VerticalNavSectionTitle
-          :item="{ heading: 'Settings' }"
-        />
-        <VerticalNavLink
-          v-for="item in settingsItems"
           :key="item.title"
           :item="item"
         />

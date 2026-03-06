@@ -4,27 +4,17 @@ import api from './api'
 
 export const authService = {
   async login(email, password) {
-    const response = await api.post('/auth-login', { email, password })
+    const response = await api.post('/api/login', { email, password, device: 'web' })
     return response.data
   },
-  
+
   async logout() {
-    const response = await api.post('/auth-logout')
+    const response = await api.post('/api/logout')
     return response.data
   },
-  
+
   async getMe() {
-    const response = await api.get('/auth-me')
-    return response.data
-  },
-  
-  async refreshToken() {
-    const response = await api.post('/auth-refresh')
-    return response.data
-  },
-  
-  async getPermissions() {
-    const response = await api.get('/auth-permissions')
+    const response = await api.get('/api/me')
     return response.data
   },
 }

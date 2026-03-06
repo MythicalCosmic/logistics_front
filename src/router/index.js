@@ -20,76 +20,14 @@ const router = createRouter({
           meta: { requiresAuth: true },
         },
         {
-          path: 'account-settings',
-          name: 'account-settings',
-          component: () => import('../pages/account-settings.vue'),
-          meta: { requiresAuth: true },
-        },
-        
-        // Admin pages
-        {
           path: 'users',
           name: 'users',
           component: () => import('../pages/user.vue'),
-          meta: { 
+          meta: {
             requiresAuth: true,
-            permissions: ['user.view'],
+            permissions: ['users.view'],
           },
         },
-        {
-          path: 'roles',
-          name: 'roles',
-          component: () => import('../pages/roles.vue'),
-          meta: { 
-            requiresAuth: true,
-            permissions: ['role.view'],
-          },
-        },
-        // {
-        //   path: 'teachers',
-        //   name: 'teachers',
-        //   component: () => import('../pages/teachers.vue'),
-        //   meta: { 
-        //     requiresAuth: true,
-        //     permissions: ['user.view'],
-        //   },
-        // },
-        {
-          path: 'groups',
-          name: 'groups',
-          component: () => import('../pages/groups.vue'),
-          meta: { 
-            requiresAuth: true,
-            permissions: ['group.view'],
-          },
-        },
-        // {
-        //   path: 'students',
-        //   name: 'students',
-        //   component: () => import('../pages/students.vue'),
-        //   meta: { 
-        //     requiresAuth: true,
-        //     permissions: ['student.view'],
-        //   },
-        // },
-        // {
-        //   path: 'attendance',
-        //   name: 'attendance',
-        //   component: () => import('../pages/attendance.vue'),
-        //   meta: { 
-        //     requiresAuth: true,
-        //     permissions: ['attendance.view'],
-        //   },
-        // },
-        // {
-        //   path: 'roles',
-        //   name: 'roles',
-        //   component: () => import('../pages/roles.vue'),
-        //   meta: { 
-        //     requiresAuth: true,
-        //     permissions: ['role.view'],
-        //   },
-        // },
       ],
     },
     
