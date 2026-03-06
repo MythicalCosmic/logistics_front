@@ -41,6 +41,12 @@ const managementItems = computed(() => [
     to: '/users',
     permission: 'users.view',
   },
+  {
+    title: 'Roles',
+    icon: 'bx-shield',
+    to: '/roles',
+    permission: 'roles.view',
+  },
 ].filter(item => can(item.permission)))
 
 const showManagementSection = computed(() => managementItems.value.length > 0)

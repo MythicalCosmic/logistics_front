@@ -28,6 +28,15 @@ const router = createRouter({
             permissions: ['users.view'],
           },
         },
+        {
+          path: 'roles',
+          name: 'roles',
+          component: () => import('../pages/roles.vue'),
+          meta: {
+            requiresAuth: true,
+            permissions: ['roles.view'],
+          },
+        },
       ],
     },
     
