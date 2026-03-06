@@ -54,6 +54,12 @@ const showManagementSection = computed(() => managementItems.value.length > 0)
 // Operations section items
 const operationsItems = computed(() => [
   {
+    title: 'Loads',
+    icon: 'bx-package',
+    to: '/loads',
+    permission: 'loads.view',
+  },
+  {
     title: 'Facilities',
     icon: 'bx-buildings',
     to: '/facilities',
