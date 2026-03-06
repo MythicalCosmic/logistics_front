@@ -1,87 +1,114 @@
-<!-- src/pages/roles.vue -->
+<!-- src/pages/facilities.vue -->
 
 <script setup>
 import { ref, onMounted, watch, computed } from 'vue'
 import { useTheme } from 'vuetify'
-import { useAuthStore } from '@/stores/auth'
 import { useToast } from '@/composables/useToast'
 import api from '@/services/api'
 
-const authStore = useAuthStore()
 const { success: toastSuccess, error: toastError } = useToast()
 const vuetifyTheme = useTheme()
 const isDark = computed(() => vuetifyTheme.global.current.value.dark)
 
-// Permissions
-const canCreate = computed(() => authStore.hasPermission('roles.create'))
-const canEdit = computed(() => authStore.hasPermission('roles.update'))
-const canDelete = computed(() => authStore.hasPermission('roles.delete'))
+// Facility types
+const facilityTypes = [
+  { title: 'Warehouse', value: 'warehouse' },
+  { title: 'Terminal', value: 'terminal' },
+  { title: 'Yard', value: 'yard' },
+  { title: 'Distribution Center', value: 'distribution_center' },
+  { title: 'Cross Dock', value: 'cross_dock' },
+  { title: 'Cold Storage', value: 'cold_storage' },
+  { title: 'Port', value: 'port' },
+]
 
 // Data
-const roles = ref([])
-const allPermissions = ref([])
+const facilities = ref([])
 const loading = ref(false)
-const totalRoles = ref(0)
+const totalFacilities = ref(0)
 
 // Pagination & Filters
 const page = ref(1)
-const perPage = ref(10)
+const perPage = ref(20)
 const search = ref('')
-const totalPages = computed(() => Math.ceil(totalRoles.value / perPage.value))
+const filterType = ref(null)
+const filterState = ref(null)
+const totalPages = computed(() => Math.ceil(totalFacilities.value / perPage.value))
 
 // Dialogs
 const showCreateDialog = ref(false)
 const showEditDialog = ref(false)
 const showDeleteDialog = ref(false)
-const showPermissionsDialog = ref(false)
 const dialogLoading = ref(false)
 
 // Form Data
 const defaultForm = {
+  code: '',
   name: '',
-  slug: '',
-  description: '',
+  address: '',
+  city: '',
+  state: '',
+  zip_code: '',
+  facility_type: 'warehouse',
 }
 const form = ref({ ...defaultForm })
 const formErrors = ref({})
-const selectedRole = ref(null)
-
-// Permission management
-const selectedPermissionIds = ref([])
-const originalPermissionIds = ref([])
+const selectedFacility = ref(null)
 
 // Stats
 const serverStats = ref(null)
 const stats = computed(() => {
   if (serverStats.value) {
-    const rolesData = serverStats.value.roles || []
-    const withUsers = rolesData.filter(r => r.user_count > 0).length
-    const mostUsed = rolesData.reduce((max, r) => (r.user_count > (max?.user_count || 0) ? r : max), null)
     return {
-      total: serverStats.value.total_roles || 0,
-      totalPermissions: serverStats.value.total_permissions || 0,
-      mostUsedRole: mostUsed,
-      rolesWithUsers: withUsers,
+      total: serverStats.value.total_facilities ?? serverStats.value.total ?? totalFacilities.value,
+      byType: serverStats.value.by_type || serverStats.value.facility_types || [],
+      byState: serverStats.value.by_state || serverStats.value.states || [],
+      recentCount: serverStats.value.recent_count ?? 0,
     }
   }
-  return { total: totalRoles.value, totalPermissions: 0, mostUsedRole: null, rolesWithUsers: 0 }
+  // Derive from current list if no stats endpoint
+  const typeMap = {}
+  const stateMap = {}
+  facilities.value.forEach(f => {
+    typeMap[f.facility_type] = (typeMap[f.facility_type] || 0) + 1
+    if (f.state) stateMap[f.state] = (stateMap[f.state] || 0) + 1
+  })
+  return {
+    total: totalFacilities.value,
+    byType: Object.entries(typeMap).map(([type, count]) => ({ type, count })),
+    byState: Object.entries(stateMap).map(([state, count]) => ({ state, count })),
+    recentCount: 0,
+  }
 })
 
-// Grouped permissions by module
-const groupedPermissions = computed(() => {
-  const groups = {}
-  allPermissions.value.forEach(perm => {
-    const parts = perm.name.split('.')
-    const module = parts.length > 1 ? parts[0] : 'general'
-    if (!groups[module]) groups[module] = []
-    groups[module].push(perm)
+// Unique states from facilities for filter
+const availableStates = computed(() => {
+  const states = new Set()
+  facilities.value.forEach(f => {
+    if (f.state) states.add(f.state)
   })
-  return groups
+  return [...states].sort().map(s => ({ title: s, value: s }))
+})
+
+// Stat cards derived
+const typeBreakdown = computed(() => {
+  const types = {}
+  facilities.value.forEach(f => {
+    types[f.facility_type] = (types[f.facility_type] || 0) + 1
+  })
+  return types
+})
+
+const stateCount = computed(() => {
+  const states = new Set()
+  facilities.value.forEach(f => {
+    if (f.state) states.add(f.state)
+  })
+  return states.size
 })
 
 const fetchStats = async () => {
   try {
-    const response = await api.get('/admin-api/roles/stats')
+    const response = await api.get('/admin-api/facilities/stats')
     if (response.data.success) {
       serverStats.value = response.data.data
     }
@@ -90,8 +117,8 @@ const fetchStats = async () => {
   }
 }
 
-// Fetch roles
-const fetchRoles = async () => {
+// Fetch facilities
+const fetchFacilities = async () => {
   loading.value = true
 
   try {
@@ -101,76 +128,49 @@ const fetchRoles = async () => {
     })
 
     if (search.value) params.append('search', search.value)
+    if (filterType.value) params.append('facility_type', filterType.value)
+    if (filterState.value) params.append('state', filterState.value)
 
-    const response = await api.get(`/admin-api/roles?${params}`)
+    const response = await api.get(`/admin-api/facilities?${params}`)
 
     if (response.data.success) {
-      const rawRoles = response.data.data?.roles || response.data.data || []
-      // Enrich roles with stats data if available (permission_count, user_count)
-      const statsRoles = serverStats.value?.roles || []
-      roles.value = rawRoles.map(role => {
-        const statsMatch = statsRoles.find(s => s.id === role.id)
-        return {
-          ...role,
-          permission_count: role.permission_count ?? statsMatch?.permission_count ?? 0,
-          user_count: role.user_count ?? statsMatch?.user_count ?? 0,
-        }
-      })
-      totalRoles.value = response.data.data?.pagination?.total || roles.value.length
+      facilities.value = response.data.data?.facilities || []
+      totalFacilities.value = response.data.data?.pagination?.total || 0
     }
   } catch (error) {
-    console.error('Failed to fetch roles:', error)
-    toastError('Failed to load roles')
+    console.error('Failed to fetch facilities:', error)
+    toastError('Failed to load facilities')
   } finally {
     loading.value = false
   }
 }
 
-// Fetch all permissions
-const fetchPermissions = async () => {
-  try {
-    const response = await api.get('/admin-api/permissions')
-    if (response.data.success) {
-      allPermissions.value = response.data.data?.permissions || response.data.data || []
-    }
-  } catch (error) {
-    console.error('Failed to fetch permissions:', error)
-  }
-}
-
-// Auto-generate slug from name
-const generateSlug = (name) => {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, '')
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .trim()
-}
-
-// Create role
+// Create facility
 const handleCreate = async () => {
   formErrors.value = {}
 
-  if (!form.value.name) formErrors.value.name = 'Role name is required'
-  if (!form.value.slug) formErrors.value.slug = 'Slug is required'
+  if (!form.value.code) formErrors.value.code = 'Code is required'
 
   if (Object.keys(formErrors.value).length > 0) return
 
   dialogLoading.value = true
 
   try {
-    const response = await api.post('/admin-api/roles/create', {
-      name: form.value.name,
-      slug: form.value.slug,
-      description: form.value.description || '',
+    const response = await api.post('/admin-api/facilities/create', {
+      code: form.value.code,
+      name: form.value.name || '',
+      address: form.value.address || '',
+      city: form.value.city || '',
+      state: form.value.state || '',
+      zip_code: form.value.zip_code || '',
+      facility_type: form.value.facility_type || 'warehouse',
     })
 
     if (response.data.success) {
-      toastSuccess('Role created successfully')
+      toastSuccess('Facility created successfully')
       showCreateDialog.value = false
       resetForm()
-      fetchRoles()
+      fetchFacilities()
       fetchStats()
     }
   } catch (error) {
@@ -180,51 +180,32 @@ const handleCreate = async () => {
   }
 }
 
-// Update role
+// Update facility
 const handleUpdate = async () => {
   formErrors.value = {}
 
-  if (!form.value.name) formErrors.value.name = 'Role name is required'
-  if (!form.value.slug) formErrors.value.slug = 'Slug is required'
+  if (!form.value.code) formErrors.value.code = 'Code is required'
 
   if (Object.keys(formErrors.value).length > 0) return
 
   dialogLoading.value = true
 
   try {
-    const response = await api.put(`/admin-api/roles/${selectedRole.value.id}/update`, {
-      name: form.value.name,
-      slug: form.value.slug,
-      description: form.value.description || '',
+    const response = await api.put(`/admin-api/facilities/${selectedFacility.value.id}/update`, {
+      code: form.value.code,
+      name: form.value.name || '',
+      address: form.value.address || '',
+      city: form.value.city || '',
+      state: form.value.state || '',
+      zip_code: form.value.zip_code || '',
+      facility_type: form.value.facility_type || 'warehouse',
     })
 
     if (response.data.success) {
-      toastSuccess('Role updated successfully')
+      toastSuccess('Facility updated successfully')
       showEditDialog.value = false
       resetForm()
-      fetchRoles()
-    }
-  } catch (error) {
-    // Handled by interceptor
-  } finally {
-    dialogLoading.value = false
-  }
-}
-
-// Delete role
-const handleDelete = async () => {
-  if (!selectedRole.value) return
-
-  dialogLoading.value = true
-
-  try {
-    const response = await api.delete(`/admin-api/roles/${selectedRole.value.id}/delete`)
-
-    if (response.data.success) {
-      toastSuccess('Role deleted successfully')
-      showDeleteDialog.value = false
-      selectedRole.value = null
-      fetchRoles()
+      fetchFacilities()
       fetchStats()
     }
   } catch (error) {
@@ -234,34 +215,22 @@ const handleDelete = async () => {
   }
 }
 
-// Save permissions (diff: add new, remove unchecked)
-const handleSavePermissions = async () => {
-  if (!selectedRole.value) return
+// Delete facility
+const handleDelete = async () => {
+  if (!selectedFacility.value) return
 
   dialogLoading.value = true
-  const roleId = selectedRole.value.id
 
   try {
-    const toAdd = selectedPermissionIds.value.filter(id => !originalPermissionIds.value.includes(id))
-    const toRemove = originalPermissionIds.value.filter(id => !selectedPermissionIds.value.includes(id))
+    const response = await api.delete(`/admin-api/facilities/${selectedFacility.value.id}/delete`)
 
-    // Add new permissions
-    for (const permId of toAdd) {
-      await api.post(`/admin-api/roles/${roleId}/permissions`, { permission_id: permId })
+    if (response.data.success) {
+      toastSuccess('Facility deleted successfully')
+      showDeleteDialog.value = false
+      selectedFacility.value = null
+      fetchFacilities()
+      fetchStats()
     }
-
-    // Remove unchecked permissions
-    for (const permId of toRemove) {
-      await api.delete(`/admin-api/roles/${roleId}/permissions/remove`, { data: { permission_id: permId } })
-    }
-
-    toastSuccess('Permissions updated successfully')
-    showPermissionsDialog.value = false
-    selectedRole.value = null
-    selectedPermissionIds.value = []
-    originalPermissionIds.value = []
-    fetchRoles()
-    fetchStats()
   } catch (error) {
     // Handled by interceptor
   } finally {
@@ -270,110 +239,79 @@ const handleSavePermissions = async () => {
 }
 
 // Open edit dialog
-const openEditDialog = (role) => {
-  selectedRole.value = role
+const openEditDialog = (facility) => {
+  selectedFacility.value = facility
   form.value = {
-    name: role.name,
-    slug: role.slug,
-    description: role.description || '',
+    code: facility.code,
+    name: facility.name || '',
+    address: facility.address || '',
+    city: facility.city || '',
+    state: facility.state || '',
+    zip_code: facility.zip_code || '',
+    facility_type: facility.facility_type || 'warehouse',
   }
   showEditDialog.value = true
 }
 
 // Open delete dialog
-const openDeleteDialog = (role) => {
-  selectedRole.value = role
+const openDeleteDialog = (facility) => {
+  selectedFacility.value = facility
   showDeleteDialog.value = true
-}
-
-// Open permissions dialog
-const openPermissionsDialog = async (role) => {
-  selectedRole.value = role
-  dialogLoading.value = true
-  showPermissionsDialog.value = true
-
-  try {
-    // Fetch role detail to get current permissions
-    const response = await api.get(`/admin-api/roles/${role.id}`)
-    if (response.data.success) {
-      const roleData = response.data.data?.role || response.data.data
-      const ids = (roleData.permissions || []).map(p => p.id)
-      selectedPermissionIds.value = [...ids]
-      originalPermissionIds.value = [...ids]
-    }
-  } catch (error) {
-    toastError('Failed to load role permissions')
-  } finally {
-    dialogLoading.value = false
-  }
-}
-
-// Toggle all permissions in a module group
-const toggleModulePermissions = (moduleName) => {
-  const modulePerms = groupedPermissions.value[moduleName] || []
-  const modulePermIds = modulePerms.map(p => p.id)
-  const allSelected = modulePermIds.every(id => selectedPermissionIds.value.includes(id))
-
-  if (allSelected) {
-    selectedPermissionIds.value = selectedPermissionIds.value.filter(id => !modulePermIds.includes(id))
-  } else {
-    const newIds = new Set([...selectedPermissionIds.value, ...modulePermIds])
-    selectedPermissionIds.value = [...newIds]
-  }
-}
-
-// Check if all permissions in a module are selected
-const isModuleFullySelected = (moduleName) => {
-  const modulePerms = groupedPermissions.value[moduleName] || []
-  return modulePerms.length > 0 && modulePerms.every(p => selectedPermissionIds.value.includes(p.id))
-}
-
-// Check if some permissions in a module are selected
-const isModulePartiallySelected = (moduleName) => {
-  const modulePerms = groupedPermissions.value[moduleName] || []
-  const selectedCount = modulePerms.filter(p => selectedPermissionIds.value.includes(p.id)).length
-  return selectedCount > 0 && selectedCount < modulePerms.length
 }
 
 // Reset form
 const resetForm = () => {
   form.value = { ...defaultForm }
   formErrors.value = {}
-  selectedRole.value = null
+  selectedFacility.value = null
 }
 
-// Get role color based on name
-const getRoleColor = (roleName) => {
-  const name = roleName?.toLowerCase() || ''
-  if (name.includes('super')) return { bg: 'rgba(244, 67, 54, 0.15)', text: '#f44336', border: 'rgba(244, 67, 54, 0.3)', gradient: 'linear-gradient(135deg, #f44336, #e91e63)' }
-  if (name.includes('admin')) return { bg: 'rgba(255, 152, 0, 0.15)', text: '#ff9800', border: 'rgba(255, 152, 0, 0.3)', gradient: 'linear-gradient(135deg, #ff9800, #f57c00)' }
-  if (name.includes('manager')) return { bg: 'rgba(156, 39, 176, 0.15)', text: '#9c27b0', border: 'rgba(156, 39, 176, 0.3)', gradient: 'linear-gradient(135deg, #9c27b0, #7b1fa2)' }
-  if (name.includes('editor')) return { bg: 'rgba(0, 150, 136, 0.15)', text: '#009688', border: 'rgba(0, 150, 136, 0.3)', gradient: 'linear-gradient(135deg, #009688, #00796b)' }
-  if (name.includes('driver')) return { bg: 'rgba(33, 150, 243, 0.15)', text: '#2196f3', border: 'rgba(33, 150, 243, 0.3)', gradient: 'linear-gradient(135deg, #2196f3, #1976d2)' }
-  return { bg: 'rgba(99, 102, 241, 0.15)', text: '#818cf8', border: 'rgba(99, 102, 241, 0.3)', gradient: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }
+// Format date
+const formatDate = (dateString) => {
+  if (!dateString) return '-'
+  return new Date(dateString).toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  })
 }
 
-// Get role icon
-const getRoleIcon = (roleName) => {
-  const name = roleName?.toLowerCase() || ''
-  if (name.includes('super')) return 'bx-crown'
-  if (name.includes('admin')) return 'bx-shield-alt-2'
-  if (name.includes('manager')) return 'bx-briefcase'
-  if (name.includes('editor')) return 'bx-edit-alt'
-  if (name.includes('driver')) return 'bx-car'
-  return 'bx-user-check'
+// Format type label
+const formatType = (type) => {
+  if (!type) return 'Unknown'
+  return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 }
 
-// Get module icon
-const getModuleIcon = (moduleName) => {
-  const name = moduleName.toLowerCase()
-  if (name.includes('user')) return 'bx-user'
-  if (name.includes('role')) return 'bx-shield'
-  if (name.includes('load')) return 'bx-package'
-  if (name.includes('order')) return 'bx-cart'
-  if (name.includes('report')) return 'bx-bar-chart-alt-2'
-  if (name.includes('setting')) return 'bx-cog'
-  return 'bx-lock-alt'
+// Get type color
+const getTypeColor = (type) => {
+  const t = type?.toLowerCase() || ''
+  if (t.includes('warehouse')) return { bg: 'rgba(99, 102, 241, 0.15)', text: '#818cf8', border: 'rgba(99, 102, 241, 0.3)', gradient: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }
+  if (t.includes('terminal')) return { bg: 'rgba(16, 185, 129, 0.15)', text: '#34d399', border: 'rgba(16, 185, 129, 0.3)', gradient: 'linear-gradient(135deg, #10b981, #06b6d4)' }
+  if (t.includes('yard')) return { bg: 'rgba(245, 158, 11, 0.15)', text: '#fbbf24', border: 'rgba(245, 158, 11, 0.3)', gradient: 'linear-gradient(135deg, #f59e0b, #f97316)' }
+  if (t.includes('distribution')) return { bg: 'rgba(236, 72, 153, 0.15)', text: '#f472b6', border: 'rgba(236, 72, 153, 0.3)', gradient: 'linear-gradient(135deg, #ec4899, #a855f7)' }
+  if (t.includes('cross')) return { bg: 'rgba(6, 182, 212, 0.15)', text: '#22d3ee', border: 'rgba(6, 182, 212, 0.3)', gradient: 'linear-gradient(135deg, #06b6d4, #3b82f6)' }
+  if (t.includes('cold')) return { bg: 'rgba(59, 130, 246, 0.15)', text: '#60a5fa', border: 'rgba(59, 130, 246, 0.3)', gradient: 'linear-gradient(135deg, #3b82f6, #6366f1)' }
+  if (t.includes('port')) return { bg: 'rgba(156, 39, 176, 0.15)', text: '#ce93d8', border: 'rgba(156, 39, 176, 0.3)', gradient: 'linear-gradient(135deg, #9c27b0, #7b1fa2)' }
+  return { bg: 'rgba(100, 116, 139, 0.15)', text: '#94a3b8', border: 'rgba(100, 116, 139, 0.3)', gradient: 'linear-gradient(135deg, #64748b, #475569)' }
+}
+
+// Get type icon
+const getTypeIcon = (type) => {
+  const t = type?.toLowerCase() || ''
+  if (t.includes('warehouse')) return 'bx-buildings'
+  if (t.includes('terminal')) return 'bx-bus'
+  if (t.includes('yard')) return 'bx-grid-alt'
+  if (t.includes('distribution')) return 'bx-transfer'
+  if (t.includes('cross')) return 'bx-intersect'
+  if (t.includes('cold')) return 'bx-water'
+  if (t.includes('port')) return 'bx-boat'
+  return 'bx-map-pin'
+}
+
+// Build full address string
+const getFullAddress = (facility) => {
+  const parts = [facility.address, facility.city, facility.state, facility.zip_code].filter(Boolean)
+  return parts.join(', ') || 'No address provided'
 }
 
 // Watch for filter changes
@@ -382,31 +320,27 @@ watch(search, () => {
   clearTimeout(searchTimeout)
   searchTimeout = setTimeout(() => {
     page.value = 1
-    fetchRoles()
+    fetchFacilities()
   }, 300)
 })
 
+watch([filterType, filterState], () => {
+  page.value = 1
+  fetchFacilities()
+})
+
 watch(page, () => {
-  fetchRoles()
+  fetchFacilities()
 })
 
-// Auto-generate slug when name changes in create mode
-watch(() => form.value.name, (newName) => {
-  if (showCreateDialog.value) {
-    form.value.slug = generateSlug(newName)
-  }
-})
-
-onMounted(async () => {
-  // Fetch stats first so roles can be enriched with counts
-  await fetchStats()
-  fetchRoles()
-  fetchPermissions()
+onMounted(() => {
+  fetchFacilities()
+  fetchStats()
 })
 </script>
 
 <template>
-  <div class="roles-page" :class="{ 'theme-light': !isDark }">
+  <div class="facilities-page" :class="{ 'theme-light': !isDark }">
     <!-- Animated Background -->
     <div class="page-bg">
       <div class="bg-gradient"></div>
@@ -423,21 +357,20 @@ onMounted(async () => {
       <div class="header-content">
         <div class="header-left">
           <div class="header-icon">
-            <VIcon icon="bx-shield" size="32" />
+            <VIcon icon="bx-buildings" size="32" />
           </div>
           <div>
-            <h1 class="page-title">Roles & Permissions</h1>
-            <p class="page-subtitle">Manage access control and security policies</p>
+            <h1 class="page-title">Facilities</h1>
+            <p class="page-subtitle">Manage warehouses, terminals, and facility locations</p>
           </div>
         </div>
         <VBtn
-          v-if="canCreate"
           class="add-btn"
           size="large"
           @click="showCreateDialog = true"
         >
           <VIcon icon="bx-plus" class="me-2" />
-          <span class="btn-text">Add Role</span>
+          <span class="btn-text">Add Facility</span>
         </VBtn>
       </div>
     </div>
@@ -446,44 +379,44 @@ onMounted(async () => {
     <div class="stats-grid">
       <div class="stat-card stat-total">
         <div class="stat-icon">
-          <VIcon icon="bx-shield" size="28" />
+          <VIcon icon="bx-buildings" size="28" />
         </div>
         <div class="stat-content">
-          <span class="stat-value">{{ stats.total }}</span>
-          <span class="stat-label">Total Roles</span>
+          <span class="stat-value">{{ totalFacilities }}</span>
+          <span class="stat-label">Total Facilities</span>
         </div>
         <div class="stat-decoration"></div>
       </div>
 
-      <div class="stat-card stat-permissions">
+      <div class="stat-card stat-warehouses">
         <div class="stat-icon">
-          <VIcon icon="bx-lock-alt" size="28" />
+          <VIcon icon="bx-box" size="28" />
         </div>
         <div class="stat-content">
-          <span class="stat-value">{{ stats.totalPermissions }}</span>
-          <span class="stat-label">Permissions</span>
+          <span class="stat-value">{{ typeBreakdown['warehouse'] || 0 }}</span>
+          <span class="stat-label">Warehouses</span>
         </div>
         <div class="stat-decoration"></div>
       </div>
 
-      <div class="stat-card stat-active">
+      <div class="stat-card stat-terminals">
         <div class="stat-icon">
-          <VIcon icon="bx-group" size="28" />
+          <VIcon icon="bx-bus" size="28" />
         </div>
         <div class="stat-content">
-          <span class="stat-value">{{ stats.rolesWithUsers }}</span>
-          <span class="stat-label">Roles In Use</span>
+          <span class="stat-value">{{ typeBreakdown['terminal'] || 0 }}</span>
+          <span class="stat-label">Terminals</span>
         </div>
         <div class="stat-decoration"></div>
       </div>
 
-      <div class="stat-card stat-popular">
+      <div class="stat-card stat-states">
         <div class="stat-icon">
-          <VIcon icon="bx-trending-up" size="28" />
+          <VIcon icon="bx-map" size="28" />
         </div>
         <div class="stat-content">
-          <span class="stat-value">{{ stats.mostUsedRole?.name || '-' }}</span>
-          <span class="stat-label">Most Used Role</span>
+          <span class="stat-value">{{ stateCount }}</span>
+          <span class="stat-label">States</span>
         </div>
         <div class="stat-decoration"></div>
       </div>
@@ -499,7 +432,7 @@ onMounted(async () => {
         <div class="filter-item search-filter">
           <VTextField
             v-model="search"
-            placeholder="Search roles by name or slug..."
+            placeholder="Search by code, name, city, state..."
             variant="outlined"
             density="comfortable"
             hide-details
@@ -512,10 +445,48 @@ onMounted(async () => {
           </VTextField>
         </div>
 
+        <div class="filter-item">
+          <VSelect
+            v-model="filterType"
+            :items="facilityTypes"
+            item-title="title"
+            item-value="value"
+            placeholder="All Types"
+            variant="outlined"
+            density="comfortable"
+            hide-details
+            clearable
+            class="filter-select"
+          >
+            <template #prepend-inner>
+              <VIcon icon="bx-category" size="20" />
+            </template>
+          </VSelect>
+        </div>
+
+        <div class="filter-item">
+          <VSelect
+            v-model="filterState"
+            :items="availableStates"
+            item-title="title"
+            item-value="value"
+            placeholder="All States"
+            variant="outlined"
+            density="comfortable"
+            hide-details
+            clearable
+            class="filter-select"
+          >
+            <template #prepend-inner>
+              <VIcon icon="bx-map-pin" size="20" />
+            </template>
+          </VSelect>
+        </div>
+
         <VBtn
           variant="tonal"
           class="clear-btn"
-          @click="search = ''"
+          @click="search = ''; filterType = null; filterState = null"
         >
           <VIcon icon="bx-refresh" class="me-2" />
           Reset
@@ -523,52 +494,51 @@ onMounted(async () => {
       </div>
     </div>
 
-    <!-- Roles List -->
-    <div class="roles-container">
+    <!-- Facilities List -->
+    <div class="facilities-container">
       <!-- Loading State -->
       <div v-if="loading" class="loading-state">
         <div class="loading-spinner">
           <div class="spinner"></div>
         </div>
-        <p>Loading roles...</p>
+        <p>Loading facilities...</p>
       </div>
 
       <!-- Empty State -->
-      <div v-else-if="!roles.length" class="empty-state">
+      <div v-else-if="!facilities.length" class="empty-state">
         <div class="empty-icon">
-          <VIcon icon="bx-shield-x" size="64" />
+          <VIcon icon="bx-map-alt" size="64" />
         </div>
-        <h3>No Roles Found</h3>
-        <p>Try adjusting your search or create a new role to get started.</p>
+        <h3>No Facilities Found</h3>
+        <p>Try adjusting your filters or add a new facility to get started.</p>
         <VBtn
-          v-if="canCreate"
           class="add-btn mt-4"
           @click="showCreateDialog = true"
         >
           <VIcon icon="bx-plus" class="me-2" />
-          Create First Role
+          Add First Facility
         </VBtn>
       </div>
 
-      <!-- Roles Grid -->
-      <div v-else class="roles-grid">
+      <!-- Facilities Grid -->
+      <div v-else class="facilities-grid">
         <div
-          v-for="(role, index) in roles"
-          :key="role.id"
-          class="role-card"
+          v-for="(facility, index) in facilities"
+          :key="facility.id"
+          class="facility-card"
           :style="{ '--delay': `${index * 0.05}s` }"
         >
           <div class="card-glow"></div>
 
-          <!-- Role Header -->
-          <div class="role-header">
-            <div class="role-avatar" :style="{ background: getRoleColor(role.name).gradient }">
-              <VIcon :icon="getRoleIcon(role.name)" size="24" color="white" />
+          <!-- Facility Header -->
+          <div class="facility-header">
+            <div class="facility-avatar" :style="{ background: getTypeColor(facility.facility_type).gradient }">
+              <VIcon :icon="getTypeIcon(facility.facility_type)" size="24" color="white" />
             </div>
 
-            <div class="role-info">
-              <h3 class="role-name">{{ role.name }}</h3>
-              <p class="role-slug">{{ role.slug }}</p>
+            <div class="facility-info">
+              <h3 class="facility-code">{{ facility.code }}</h3>
+              <p class="facility-name">{{ facility.name || 'Unnamed facility' }}</p>
             </div>
 
             <!-- Actions Menu -->
@@ -584,104 +554,67 @@ onMounted(async () => {
                 </VBtn>
               </template>
               <VList class="action-menu">
-                <VListItem v-if="canEdit" @click="openPermissionsDialog(role)">
-                  <template #prepend>
-                    <VIcon icon="bx-lock-alt" color="info" />
-                  </template>
-                  <VListItemTitle>Manage Permissions</VListItemTitle>
-                </VListItem>
-                <VListItem v-if="canEdit" @click="openEditDialog(role)">
+                <VListItem @click="openEditDialog(facility)">
                   <template #prepend>
                     <VIcon icon="bx-edit" color="primary" />
                   </template>
-                  <VListItemTitle>Edit Role</VListItemTitle>
+                  <VListItemTitle>Edit Facility</VListItemTitle>
                 </VListItem>
                 <VListItem
-                  v-if="canDelete"
-                  @click="openDeleteDialog(role)"
+                  @click="openDeleteDialog(facility)"
                   class="delete-item"
                 >
                   <template #prepend>
                     <VIcon icon="bx-trash" color="error" />
                   </template>
-                  <VListItemTitle class="text-error">Delete Role</VListItemTitle>
+                  <VListItemTitle class="text-error">Delete Facility</VListItemTitle>
                 </VListItem>
               </VList>
             </VMenu>
           </div>
 
-          <!-- Description -->
-          <p class="role-description">
-            {{ role.description || 'No description provided' }}
-          </p>
-
-          <!-- Permissions Count -->
-          <div class="role-permissions-info">
-            <div class="permission-count">
-              <VIcon icon="bx-lock-alt" size="16" />
-              <span>{{ role.permission_count ?? role.permissions?.length ?? 0 }} permissions</span>
-            </div>
-            <div class="user-count">
-              <VIcon icon="bx-user" size="16" />
-              <span>{{ role.user_count ?? 0 }} users</span>
-            </div>
+          <!-- Address -->
+          <div class="facility-address">
+            <VIcon icon="bx-map" size="16" />
+            <span>{{ getFullAddress(facility) }}</span>
           </div>
 
           <!-- Footer -->
-          <div class="role-footer">
-            <div class="footer-item">
-              <span
-                class="role-badge"
-                :style="{
-                  background: getRoleColor(role.name).bg,
-                  color: getRoleColor(role.name).text,
-                  borderColor: getRoleColor(role.name).border,
-                }"
-              >
-                {{ role.slug }}
-              </span>
-            </div>
-            <VBtn
-              v-if="canEdit"
-              variant="tonal"
-              size="small"
-              class="permissions-btn"
-              @click="openPermissionsDialog(role)"
+          <div class="facility-footer">
+            <span
+              class="type-badge"
+              :style="{
+                background: getTypeColor(facility.facility_type).bg,
+                color: getTypeColor(facility.facility_type).text,
+                borderColor: getTypeColor(facility.facility_type).border,
+              }"
             >
-              <VIcon icon="bx-lock-open-alt" size="16" class="me-1" />
-              Permissions
-            </VBtn>
+              <VIcon :icon="getTypeIcon(facility.facility_type)" size="14" class="me-1" />
+              {{ formatType(facility.facility_type) }}
+            </span>
+            <div class="footer-date">
+              <VIcon icon="bx-calendar" size="16" />
+              <span>{{ formatDate(facility.created_at) }}</span>
+            </div>
           </div>
 
           <!-- Quick Actions (Mobile) -->
           <div class="quick-actions">
             <VBtn
-              v-if="canEdit"
-              icon
-              size="small"
-              variant="tonal"
-              color="info"
-              @click="openPermissionsDialog(role)"
-            >
-              <VIcon icon="bx-lock-alt" size="18" />
-            </VBtn>
-            <VBtn
-              v-if="canEdit"
               icon
               size="small"
               variant="tonal"
               color="primary"
-              @click="openEditDialog(role)"
+              @click="openEditDialog(facility)"
             >
               <VIcon icon="bx-edit" size="18" />
             </VBtn>
             <VBtn
-              v-if="canDelete"
               icon
               size="small"
               variant="tonal"
               color="error"
-              @click="openDeleteDialog(role)"
+              @click="openDeleteDialog(facility)"
             >
               <VIcon icon="bx-trash" size="18" />
             </VBtn>
@@ -690,11 +623,11 @@ onMounted(async () => {
       </div>
 
       <!-- Pagination -->
-      <div v-if="roles.length && totalPages > 1" class="pagination-container">
+      <div v-if="facilities.length && totalPages > 1" class="pagination-container">
         <div class="pagination-info">
           Showing <strong>{{ (page - 1) * perPage + 1 }}</strong> to
-          <strong>{{ Math.min(page * perPage, totalRoles) }}</strong> of
-          <strong>{{ totalRoles }}</strong> roles
+          <strong>{{ Math.min(page * perPage, totalFacilities) }}</strong> of
+          <strong>{{ totalFacilities }}</strong> facilities
         </div>
         <div class="pagination-controls">
           <VBtn
@@ -735,15 +668,15 @@ onMounted(async () => {
     </div>
 
     <!-- Create Dialog -->
-    <VDialog v-model="showCreateDialog" max-width="550" persistent class="custom-dialog">
+    <VDialog v-model="showCreateDialog" max-width="600" persistent class="custom-dialog">
       <VCard class="dialog-card">
         <div class="dialog-header">
           <div class="dialog-icon create">
-            <VIcon icon="bx-shield-plus" size="28" />
+            <VIcon icon="bx-map-pin" size="28" />
           </div>
           <div>
-            <h2 class="dialog-title">Create New Role</h2>
-            <p class="dialog-subtitle">Define a new access role for your platform</p>
+            <h2 class="dialog-title">Add New Facility</h2>
+            <p class="dialog-subtitle">Register a new warehouse or terminal location</p>
           </div>
           <VBtn icon variant="text" class="close-btn" @click="showCreateDialog = false; resetForm()">
             <VIcon icon="bx-x" />
@@ -751,29 +684,15 @@ onMounted(async () => {
         </div>
 
         <VCardText class="dialog-body">
-          <div class="form-stack">
+          <div class="form-grid">
             <div class="form-group">
-              <label class="form-label">Role Name <span class="required">*</span></label>
+              <label class="form-label">Code <span class="required">*</span></label>
               <VTextField
-                v-model="form.name"
+                v-model="form.code"
                 variant="outlined"
                 density="comfortable"
-                placeholder="e.g. Content Manager"
-                :error-messages="formErrors.name"
-              >
-                <template #prepend-inner>
-                  <VIcon icon="bx-shield" />
-                </template>
-              </VTextField>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Slug <span class="required">*</span></label>
-              <VTextField
-                v-model="form.slug"
-                variant="outlined"
-                density="comfortable"
-                placeholder="e.g. content-manager"
-                :error-messages="formErrors.slug"
+                placeholder="e.g. WH-001"
+                :error-messages="formErrors.code"
               >
                 <template #prepend-inner>
                   <VIcon icon="bx-hash" />
@@ -781,19 +700,77 @@ onMounted(async () => {
               </VTextField>
             </div>
             <div class="form-group">
-              <label class="form-label">Description</label>
-              <VTextarea
-                v-model="form.description"
+              <label class="form-label">Name</label>
+              <VTextField
+                v-model="form.name"
                 variant="outlined"
                 density="comfortable"
-                placeholder="Brief description of this role's purpose..."
-                rows="3"
-                auto-grow
+                placeholder="Facility name"
               >
                 <template #prepend-inner>
-                  <VIcon icon="bx-text" />
+                  <VIcon icon="bx-buildings" />
                 </template>
-              </VTextarea>
+              </VTextField>
+            </div>
+            <div class="form-group full-width">
+              <label class="form-label">Facility Type</label>
+              <VSelect
+                v-model="form.facility_type"
+                :items="facilityTypes"
+                item-title="title"
+                item-value="value"
+                variant="outlined"
+                density="comfortable"
+                hide-details
+              >
+                <template #prepend-inner>
+                  <VIcon icon="bx-category" />
+                </template>
+              </VSelect>
+            </div>
+            <div class="form-group full-width">
+              <label class="form-label">Address</label>
+              <VTextField
+                v-model="form.address"
+                variant="outlined"
+                density="comfortable"
+                placeholder="Street address"
+              >
+                <template #prepend-inner>
+                  <VIcon icon="bx-map" />
+                </template>
+              </VTextField>
+            </div>
+            <div class="form-group">
+              <label class="form-label">City</label>
+              <VTextField
+                v-model="form.city"
+                variant="outlined"
+                density="comfortable"
+                placeholder="City"
+              />
+            </div>
+            <div class="form-group">
+              <label class="form-label">State</label>
+              <VTextField
+                v-model="form.state"
+                variant="outlined"
+                density="comfortable"
+                placeholder="State"
+              />
+            </div>
+            <div class="form-group full-width">
+              <label class="form-label">Zip Code</label>
+              <VTextField
+                v-model="form.zip_code"
+                variant="outlined"
+                density="comfortable"
+                placeholder="Zip code"
+              >
+                <template #prepend-inner>
+                  <VIcon icon="bx-envelope" />
+                </template>
+              </VTextField>
             </div>
           </div>
         </VCardText>
@@ -804,22 +781,22 @@ onMounted(async () => {
           </VBtn>
           <VBtn class="submit-btn" size="large" :loading="dialogLoading" @click="handleCreate">
             <VIcon icon="bx-plus" class="me-2" />
-            Create Role
+            Create Facility
           </VBtn>
         </div>
       </VCard>
     </VDialog>
 
     <!-- Edit Dialog -->
-    <VDialog v-model="showEditDialog" max-width="550" persistent class="custom-dialog">
+    <VDialog v-model="showEditDialog" max-width="600" persistent class="custom-dialog">
       <VCard class="dialog-card">
         <div class="dialog-header">
           <div class="dialog-icon edit">
             <VIcon icon="bx-edit" size="28" />
           </div>
           <div>
-            <h2 class="dialog-title">Edit Role</h2>
-            <p class="dialog-subtitle">Update role information</p>
+            <h2 class="dialog-title">Edit Facility</h2>
+            <p class="dialog-subtitle">Update facility information</p>
           </div>
           <VBtn icon variant="text" class="close-btn" @click="showEditDialog = false; resetForm()">
             <VIcon icon="bx-x" />
@@ -827,29 +804,15 @@ onMounted(async () => {
         </div>
 
         <VCardText class="dialog-body">
-          <div class="form-stack">
+          <div class="form-grid">
             <div class="form-group">
-              <label class="form-label">Role Name <span class="required">*</span></label>
+              <label class="form-label">Code <span class="required">*</span></label>
               <VTextField
-                v-model="form.name"
+                v-model="form.code"
                 variant="outlined"
                 density="comfortable"
-                placeholder="e.g. Content Manager"
-                :error-messages="formErrors.name"
-              >
-                <template #prepend-inner>
-                  <VIcon icon="bx-shield" />
-                </template>
-              </VTextField>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Slug <span class="required">*</span></label>
-              <VTextField
-                v-model="form.slug"
-                variant="outlined"
-                density="comfortable"
-                placeholder="e.g. content-manager"
-                :error-messages="formErrors.slug"
+                placeholder="e.g. WH-001"
+                :error-messages="formErrors.code"
               >
                 <template #prepend-inner>
                   <VIcon icon="bx-hash" />
@@ -857,19 +820,77 @@ onMounted(async () => {
               </VTextField>
             </div>
             <div class="form-group">
-              <label class="form-label">Description</label>
-              <VTextarea
-                v-model="form.description"
+              <label class="form-label">Name</label>
+              <VTextField
+                v-model="form.name"
                 variant="outlined"
                 density="comfortable"
-                placeholder="Brief description of this role's purpose..."
-                rows="3"
-                auto-grow
+                placeholder="Facility name"
               >
                 <template #prepend-inner>
-                  <VIcon icon="bx-text" />
+                  <VIcon icon="bx-buildings" />
                 </template>
-              </VTextarea>
+              </VTextField>
+            </div>
+            <div class="form-group full-width">
+              <label class="form-label">Facility Type</label>
+              <VSelect
+                v-model="form.facility_type"
+                :items="facilityTypes"
+                item-title="title"
+                item-value="value"
+                variant="outlined"
+                density="comfortable"
+                hide-details
+              >
+                <template #prepend-inner>
+                  <VIcon icon="bx-category" />
+                </template>
+              </VSelect>
+            </div>
+            <div class="form-group full-width">
+              <label class="form-label">Address</label>
+              <VTextField
+                v-model="form.address"
+                variant="outlined"
+                density="comfortable"
+                placeholder="Street address"
+              >
+                <template #prepend-inner>
+                  <VIcon icon="bx-map" />
+                </template>
+              </VTextField>
+            </div>
+            <div class="form-group">
+              <label class="form-label">City</label>
+              <VTextField
+                v-model="form.city"
+                variant="outlined"
+                density="comfortable"
+                placeholder="City"
+              />
+            </div>
+            <div class="form-group">
+              <label class="form-label">State</label>
+              <VTextField
+                v-model="form.state"
+                variant="outlined"
+                density="comfortable"
+                placeholder="State"
+              />
+            </div>
+            <div class="form-group full-width">
+              <label class="form-label">Zip Code</label>
+              <VTextField
+                v-model="form.zip_code"
+                variant="outlined"
+                density="comfortable"
+                placeholder="Zip code"
+              >
+                <template #prepend-inner>
+                  <VIcon icon="bx-envelope" />
+                </template>
+              </VTextField>
             </div>
           </div>
         </VCardText>
@@ -893,14 +914,15 @@ onMounted(async () => {
           <div class="delete-icon">
             <VIcon icon="bx-error-circle" size="64" />
           </div>
-          <h2 class="delete-title">Delete Role</h2>
+          <h2 class="delete-title">Delete Facility</h2>
           <p class="delete-message">
             Are you sure you want to delete
-            <strong>{{ selectedRole?.name }}</strong>?
+            <strong>{{ selectedFacility?.code }}</strong>
+            <template v-if="selectedFacility?.name"> ({{ selectedFacility.name }})</template>?
           </p>
           <p class="delete-warning">
             <VIcon icon="bx-info-circle" size="16" />
-            This will remove the role from all assigned users.
+            This action cannot be undone.
           </p>
         </div>
 
@@ -910,106 +932,8 @@ onMounted(async () => {
           </VBtn>
           <VBtn color="error" size="large" :loading="dialogLoading" @click="handleDelete">
             <VIcon icon="bx-trash" class="me-2" />
-            Delete Role
+            Delete Facility
           </VBtn>
-        </div>
-      </VCard>
-    </VDialog>
-
-    <!-- Permissions Dialog -->
-    <VDialog v-model="showPermissionsDialog" max-width="700" persistent class="custom-dialog">
-      <VCard class="dialog-card">
-        <div class="dialog-header">
-          <div class="dialog-icon permissions">
-            <VIcon icon="bx-lock-alt" size="28" />
-          </div>
-          <div>
-            <h2 class="dialog-title">Manage Permissions</h2>
-            <p class="dialog-subtitle">
-              Configure permissions for <strong>{{ selectedRole?.name }}</strong>
-            </p>
-          </div>
-          <VBtn icon variant="text" class="close-btn" @click="showPermissionsDialog = false; selectedPermissionIds = []; originalPermissionIds = []">
-            <VIcon icon="bx-x" />
-          </VBtn>
-        </div>
-
-        <VCardText class="dialog-body permissions-body">
-          <div v-if="dialogLoading && !Object.keys(groupedPermissions).length" class="loading-state" style="padding: 40px;">
-            <div class="loading-spinner">
-              <div class="spinner"></div>
-            </div>
-            <p>Loading permissions...</p>
-          </div>
-
-          <div v-else class="permissions-grid">
-            <div
-              v-for="(perms, moduleName) in groupedPermissions"
-              :key="moduleName"
-              class="permission-module"
-            >
-              <div class="module-header" @click="toggleModulePermissions(moduleName)">
-                <div class="module-info">
-                  <div class="module-icon">
-                    <VIcon :icon="getModuleIcon(moduleName)" size="20" />
-                  </div>
-                  <span class="module-name">{{ moduleName }}</span>
-                  <span class="module-count">{{ perms.filter(p => selectedPermissionIds.includes(p.id)).length }}/{{ perms.length }}</span>
-                </div>
-                <VCheckbox
-                  :model-value="isModuleFullySelected(moduleName)"
-                  :indeterminate="isModulePartiallySelected(moduleName)"
-                  hide-details
-                  density="compact"
-                  color="primary"
-                  @click.stop="toggleModulePermissions(moduleName)"
-                />
-              </div>
-
-              <div class="module-permissions">
-                <label
-                  v-for="perm in perms"
-                  :key="perm.id"
-                  class="permission-item"
-                  :class="{ active: selectedPermissionIds.includes(perm.id) }"
-                >
-                  <VCheckbox
-                    :model-value="selectedPermissionIds.includes(perm.id)"
-                    hide-details
-                    density="compact"
-                    color="primary"
-                    @update:model-value="(val) => {
-                      if (val) {
-                        selectedPermissionIds.push(perm.id)
-                      } else {
-                        selectedPermissionIds = selectedPermissionIds.filter(id => id !== perm.id)
-                      }
-                    }"
-                  />
-                  <div class="permission-info">
-                    <span class="permission-name">{{ perm.name }}</span>
-                    <span v-if="perm.description" class="permission-desc">{{ perm.description }}</span>
-                  </div>
-                </label>
-              </div>
-            </div>
-          </div>
-        </VCardText>
-
-        <div class="dialog-footer">
-          <div class="footer-info">
-            <VIcon icon="bx-check-circle" size="16" />
-            <span>{{ selectedPermissionIds.length }} permissions selected</span>
-          </div>
-          <div class="footer-actions">
-            <VBtn variant="outlined" size="large" @click="showPermissionsDialog = false; selectedPermissionIds = []; originalPermissionIds = []">
-              Cancel
-            </VBtn>
-            <VBtn class="submit-btn permissions-save" size="large" :loading="dialogLoading" @click="handleSavePermissions">
-              <VIcon icon="bx-check" class="me-2" />
-              Save Permissions
-            </VBtn>
-          </div>
         </div>
       </VCard>
     </VDialog>
@@ -1018,7 +942,7 @@ onMounted(async () => {
 
 <style scoped>
 /* Theme Variables */
-.roles-page {
+.facilities-page {
   --primary: #6366f1;
   --primary-light: #818cf8;
   --primary-dark: #4f46e5;
@@ -1041,7 +965,6 @@ onMounted(async () => {
   --text-secondary: #94a3b8;
   --text-muted: #64748b;
   --border-line: rgba(255, 255, 255, 0.06);
-  --status-ring: #1e1e2e;
   --grad-base-start: #0f0f1a;
   --grad-base-end: #1a1a2e;
   --grid-line: rgba(255, 255, 255, 0.02);
@@ -1050,7 +973,7 @@ onMounted(async () => {
   --shadow-btn: 0 8px 32px rgba(99, 102, 241, 0.35);
 }
 
-.roles-page.theme-light {
+.facilities-page.theme-light {
   --card-bg: rgba(255, 255, 255, 0.9);
   --card-bg-subtle: rgba(0, 0, 0, 0.02);
   --card-border: rgba(0, 0, 0, 0.08);
@@ -1067,7 +990,6 @@ onMounted(async () => {
   --text-secondary: #64748b;
   --text-muted: #94a3b8;
   --border-line: rgba(0, 0, 0, 0.06);
-  --status-ring: #ffffff;
   --grad-base-start: #f8f9fe;
   --grad-base-end: #f1f3f9;
   --grid-line: rgba(0, 0, 0, 0.03);
@@ -1077,7 +999,7 @@ onMounted(async () => {
 }
 
 /* Page Layout */
-.roles-page {
+.facilities-page {
   position: relative;
   min-height: 100vh;
   padding: 24px;
@@ -1132,7 +1054,6 @@ onMounted(async () => {
   background: linear-gradient(135deg, #6366f1, #8b5cf6);
   top: -200px;
   left: -200px;
-  animation-delay: 0s;
 }
 
 .shape-2 {
@@ -1263,17 +1184,17 @@ onMounted(async () => {
   color: var(--primary-light);
 }
 
-.stat-permissions .stat-icon {
+.stat-warehouses .stat-icon {
   background: linear-gradient(135deg, rgba(245, 158, 11, 0.2), rgba(249, 115, 22, 0.2));
   color: #fbbf24;
 }
 
-.stat-active .stat-icon {
+.stat-terminals .stat-icon {
   background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(6, 182, 212, 0.2));
   color: #34d399;
 }
 
-.stat-popular .stat-icon {
+.stat-states .stat-icon {
   background: linear-gradient(135deg, rgba(236, 72, 153, 0.2), rgba(168, 85, 247, 0.2));
   color: #f472b6;
 }
@@ -1281,7 +1202,6 @@ onMounted(async () => {
 .stat-content {
   display: flex;
   flex-direction: column;
-  min-width: 0;
 }
 
 .stat-value {
@@ -1289,13 +1209,6 @@ onMounted(async () => {
   font-weight: 700;
   color: var(--text-heading);
   line-height: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.stat-popular .stat-value {
-  font-size: 18px;
 }
 
 .stat-label {
@@ -1318,15 +1231,15 @@ onMounted(async () => {
   background: linear-gradient(135deg, #6366f1, #8b5cf6);
 }
 
-.stat-permissions .stat-decoration {
+.stat-warehouses .stat-decoration {
   background: linear-gradient(135deg, #f59e0b, #f97316);
 }
 
-.stat-active .stat-decoration {
+.stat-terminals .stat-decoration {
   background: linear-gradient(135deg, #10b981, #06b6d4);
 }
 
-.stat-popular .stat-decoration {
+.stat-states .stat-decoration {
   background: linear-gradient(135deg, #ec4899, #a855f7);
 }
 
@@ -1379,14 +1292,19 @@ onMounted(async () => {
   color: var(--text-secondary);
 }
 
+.filter-select :deep(.v-field) {
+  background: var(--input-bg);
+  border-radius: 12px;
+}
+
 .clear-btn {
   height: 48px !important;
   border-radius: 12px !important;
   flex-shrink: 0;
 }
 
-/* Roles Container */
-.roles-container {
+/* Facilities Container */
+.facilities-container {
   background: var(--surface-bg);
   backdrop-filter: blur(20px);
   border: 1px solid var(--card-border);
@@ -1456,15 +1374,15 @@ onMounted(async () => {
   margin: 0;
 }
 
-/* Roles Grid */
-.roles-grid {
+/* Facilities Grid */
+.facilities-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   gap: 20px;
 }
 
-/* Role Card */
-.role-card {
+/* Facility Card */
+.facility-card {
   position: relative;
   background: var(--card-bg-subtle);
   border: 1px solid var(--card-border);
@@ -1484,12 +1402,12 @@ onMounted(async () => {
   }
 }
 
-.role-card:hover {
+.facility-card:hover {
   border-color: rgba(99, 102, 241, 0.3);
   transform: translateY(-4px);
 }
 
-.role-card:hover .card-glow {
+.facility-card:hover .card-glow {
   opacity: 1;
 }
 
@@ -1504,16 +1422,15 @@ onMounted(async () => {
   filter: blur(20px);
 }
 
-/* Role Header */
-.role-header {
+/* Facility Header */
+.facility-header {
   display: flex;
   align-items: flex-start;
   gap: 14px;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
-.role-avatar {
-  position: relative;
+.facility-avatar {
   width: 52px;
   height: 52px;
   border-radius: 14px;
@@ -1524,26 +1441,27 @@ onMounted(async () => {
   box-shadow: var(--shadow-card);
 }
 
-.role-info {
+.facility-info {
   flex: 1;
   min-width: 0;
 }
 
-.role-name {
-  font-size: 17px;
-  font-weight: 600;
+.facility-code {
+  font-size: 18px;
+  font-weight: 700;
   color: var(--text-heading);
   margin: 0;
+  font-family: monospace;
+  letter-spacing: 0.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.role-slug {
+.facility-name {
   font-size: 14px;
   color: var(--text-secondary);
   margin: 2px 0 0;
-  font-family: monospace;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1565,7 +1483,7 @@ onMounted(async () => {
   border: 1px solid var(--dialog-border);
   border-radius: 12px !important;
   padding: 8px !important;
-  min-width: 200px;
+  min-width: 180px;
 }
 
 .action-menu :deep(.v-list-item) {
@@ -1583,44 +1501,25 @@ onMounted(async () => {
   padding-top: 4px;
 }
 
-/* Description */
-.role-description {
-  font-size: 14px;
-  color: var(--text-secondary);
-  margin: 0 0 16px;
-  line-height: 1.5;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-/* Permissions Count */
-.role-permissions-info {
+/* Address */
+.facility-address {
   display: flex;
-  gap: 20px;
-  margin-bottom: 16px;
-}
-
-.permission-count,
-.user-count {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  align-items: flex-start;
+  gap: 8px;
   font-size: 13px;
   color: var(--text-muted);
+  margin-bottom: 16px;
+  line-height: 1.5;
 }
 
-.permission-count .v-icon {
+.facility-address .v-icon {
   color: var(--primary-light);
+  flex-shrink: 0;
+  margin-top: 2px;
 }
 
-.user-count .v-icon {
-  color: #34d399;
-}
-
-/* Role Footer */
-.role-footer {
+/* Footer */
+.facility-footer {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1628,21 +1527,23 @@ onMounted(async () => {
   border-top: 1px solid var(--border-line);
 }
 
-.role-badge {
+.type-badge {
+  display: inline-flex;
+  align-items: center;
   font-size: 12px;
   font-weight: 600;
   padding: 6px 12px;
   border-radius: 8px;
   border: 1px solid;
   letter-spacing: 0.3px;
-  font-family: monospace;
 }
 
-.permissions-btn {
-  font-size: 12px;
-  font-weight: 600;
-  border-radius: 10px !important;
-  text-transform: none;
+.footer-date {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
 }
 
 /* Quick Actions */
@@ -1751,11 +1652,6 @@ onMounted(async () => {
   color: var(--primary-light);
 }
 
-.dialog-icon.permissions {
-  background: linear-gradient(135deg, rgba(59, 130, 246, 0.2), rgba(99, 102, 241, 0.2));
-  color: #60a5fa;
-}
-
 .dialog-title {
   font-size: 22px;
   font-weight: 700;
@@ -1780,9 +1676,9 @@ onMounted(async () => {
   padding: 24px !important;
 }
 
-.form-stack {
-  display: flex;
-  flex-direction: column;
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
   gap: 20px;
 }
 
@@ -1790,6 +1686,10 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.form-group.full-width {
+  grid-column: 1 / -1;
 }
 
 .form-label {
@@ -1823,10 +1723,6 @@ onMounted(async () => {
 
 .submit-btn.edit {
   background: linear-gradient(135deg, #6366f1, #8b5cf6) !important;
-}
-
-.submit-btn.permissions-save {
-  background: linear-gradient(135deg, #3b82f6, #6366f1) !important;
 }
 
 /* Delete Dialog */
@@ -1884,130 +1780,6 @@ onMounted(async () => {
   justify-content: center;
 }
 
-/* Permissions Dialog */
-.permissions-body {
-  max-height: 60vh;
-  overflow-y: auto;
-}
-
-.permissions-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.permission-module {
-  background: var(--card-bg-subtle);
-  border: 1px solid var(--card-border);
-  border-radius: 16px;
-  overflow: hidden;
-}
-
-.module-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 20px;
-  cursor: pointer;
-  transition: background 0.2s ease;
-  background: var(--hover-bg);
-}
-
-.module-header:hover {
-  background: var(--hover-bg-strong);
-}
-
-.module-info {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.module-icon {
-  width: 36px;
-  height: 36px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(139, 92, 246, 0.15));
-  border-radius: 10px;
-  color: var(--primary-light);
-}
-
-.module-name {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text-heading);
-  text-transform: capitalize;
-}
-
-.module-count {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-  background: var(--input-bg);
-  padding: 3px 10px;
-  border-radius: 20px;
-}
-
-.module-permissions {
-  padding: 8px 12px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.permission-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border-radius: 10px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.permission-item:hover {
-  background: var(--hover-bg);
-}
-
-.permission-item.active {
-  background: rgba(99, 102, 241, 0.08);
-}
-
-.permission-info {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.permission-name {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text-body);
-  font-family: monospace;
-}
-
-.permission-desc {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-top: 2px;
-}
-
-.footer-info {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  color: var(--primary-light);
-  font-weight: 600;
-}
-
-.footer-actions {
-  display: flex;
-  gap: 12px;
-}
-
 /* Mobile Responsive */
 @media (max-width: 1200px) {
   .stats-grid {
@@ -2016,7 +1788,7 @@ onMounted(async () => {
 }
 
 @media (max-width: 768px) {
-  .roles-page {
+  .facilities-page {
     padding: 16px;
   }
 
@@ -2058,11 +1830,11 @@ onMounted(async () => {
     min-width: 100%;
   }
 
-  .roles-grid {
+  .facilities-grid {
     grid-template-columns: 1fr;
   }
 
-  .role-card {
+  .facility-card {
     padding: 20px;
   }
 
@@ -2083,6 +1855,14 @@ onMounted(async () => {
     order: 2;
   }
 
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .form-group {
+    grid-column: 1;
+  }
+
   .dialog-header {
     flex-wrap: wrap;
   }
@@ -2094,21 +1874,6 @@ onMounted(async () => {
 
   .dialog-title {
     font-size: 18px;
-  }
-
-  .dialog-footer {
-    flex-wrap: wrap;
-  }
-
-  .footer-info {
-    width: 100%;
-    justify-content: center;
-    margin-bottom: 8px;
-  }
-
-  .footer-actions {
-    width: 100%;
-    justify-content: flex-end;
   }
 }
 

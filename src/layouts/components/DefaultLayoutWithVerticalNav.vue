@@ -50,6 +50,18 @@ const managementItems = computed(() => [
 ].filter(item => can(item.permission)))
 
 const showManagementSection = computed(() => managementItems.value.length > 0)
+
+// Operations section items
+const operationsItems = computed(() => [
+  {
+    title: 'Facilities',
+    icon: 'bx-buildings',
+    to: '/facilities',
+    permission: null,
+  },
+].filter(item => can(item.permission)))
+
+const showOperationsSection = computed(() => operationsItems.value.length > 0)
 </script>
 
 <template>
@@ -100,6 +112,18 @@ const showManagementSection = computed(() => managementItems.value.length > 0)
         />
         <VerticalNavLink
           v-for="item in managementItems"
+          :key="item.title"
+          :item="item"
+        />
+      </template>
+
+      <!-- Operations Section -->
+      <template v-if="showOperationsSection">
+        <VerticalNavSectionTitle
+          :item="{ heading: 'Operations' }"
+        />
+        <VerticalNavLink
+          v-for="item in operationsItems"
           :key="item.title"
           :item="item"
         />

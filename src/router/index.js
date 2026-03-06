@@ -37,6 +37,12 @@ const router = createRouter({
             permissions: ['roles.view'],
           },
         },
+        {
+          path: 'facilities',
+          name: 'facilities',
+          component: () => import('../pages/facilities.vue'),
+          meta: { requiresAuth: true },
+        },
       ],
     },
     
