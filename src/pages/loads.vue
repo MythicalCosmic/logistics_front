@@ -6,6 +6,7 @@ import { useTheme } from 'vuetify'
 import { useAuthStore } from '@/stores/auth'
 import { useToast } from '@/composables/useToast'
 import api from '@/services/api'
+import { createWorker } from 'tesseract.js'
 
 const authStore = useAuthStore()
 const { success: toastSuccess, error: toastError } = useToast()
@@ -457,6 +458,217 @@ const resetForm = () => {
   form.value = { ...defaultForm }
   formErrors.value = {}
   selectedLoad.value = null
+  ocrImagePreview.value = null
+  ocrProgress.value = 0
+}
+
+// OCR Image Upload
+const ocrLoading = ref(false)
+const ocrProgress = ref(0)
+const ocrImagePreview = ref(null)
+const imageInputRef = ref(null)
+const isDragging = ref(false)
+
+const handleImageDrop = (event) => {
+  isDragging.value = false
+  const file = event.dataTransfer?.files?.[0]
+  if (file && file.type.startsWith('image/')) processImage(file)
+  else toastError('Please drop an image file (PNG, JPG, etc.)')
+}
+
+const handleImageSelect = (event) => {
+  const file = event.target?.files?.[0]
+  if (file) processImage(file)
+  if (imageInputRef.value) imageInputRef.value.value = ''
+}
+
+const processImage = async (file) => {
+  ocrLoading.value = true
+  ocrProgress.value = 0
+
+  // Show preview
+  const reader = new FileReader()
+  reader.onload = (e) => { ocrImagePreview.value = e.target.result }
+  reader.readAsDataURL(file)
+
+  try {
+    const worker = await createWorker('eng', 1, {
+      logger: (m) => {
+        if (m.status === 'recognizing text') ocrProgress.value = Math.round(m.progress * 100)
+      },
+    })
+    const { data: { text } } = await worker.recognize(file)
+    await worker.terminate()
+
+    const parsed = parseLoadFromText(text)
+    if (parsed) {
+      // Apply parsed data to form (only non-empty values)
+      Object.entries(parsed).forEach(([key, val]) => {
+        if (val && form.value.hasOwnProperty(key)) form.value[key] = val
+      })
+      // Try to match facility names to IDs
+      matchFacilities(parsed)
+      toastSuccess('Image scanned! Review the extracted data below.')
+    } else {
+      toastError('Could not extract load data from this image. Try a clearer image.')
+    }
+  } catch (err) {
+    console.error('OCR error:', err)
+    toastError('Failed to process image. Please try again.')
+  } finally {
+    ocrLoading.value = false
+    ocrProgress.value = 100
+  }
+}
+
+const parseLoadFromText = (text) => {
+  if (!text || text.trim().length < 10) return null
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+  const fullText = lines.join(' ')
+  const result = {}
+
+  // Load ID patterns: "Load ID: XXX", "Load #XXX", "Load: XXX", "LOAD ID XXX"
+  const loadIdMatch = fullText.match(/load\s*(?:id|#|:)\s*[:#]?\s*([A-Z0-9][\w-]{2,20})/i)
+  if (loadIdMatch) result.load_id = loadIdMatch[1].trim()
+
+  // Tour ID patterns
+  const tourMatch = fullText.match(/tour\s*(?:id|#|:)\s*[:#]?\s*([A-Z0-9][\w-]{2,20})/i)
+  if (tourMatch) result.tour_id = tourMatch[1].trim()
+
+  // Payout / Rate patterns: "$1,234.56", "Pay: $1234", "Rate: $1234", "Payout: $1234"
+  const payoutMatch = fullText.match(/(?:payout|pay(?:ment)?|rate|amount|compensation|total\s*pay)[:\s]*\$?\s*([\d,]+\.?\d*)/i)
+  if (payoutMatch) result.payout = payoutMatch[1].replace(/,/g, '')
+  else {
+    // Fallback: find dollar amounts
+    const dollarMatches = fullText.match(/\$\s*([\d,]+\.?\d*)/g)
+    if (dollarMatches && dollarMatches.length > 0) {
+      // Take the largest dollar amount as payout
+      const amounts = dollarMatches.map(m => parseFloat(m.replace(/[$,\s]/g, ''))).filter(n => !isNaN(n))
+      if (amounts.length) result.payout = String(Math.max(...amounts))
+    }
+  }
+
+  // Miles patterns: "1234 mi", "1234 miles", "Total Miles: 1234", "Distance: 1234"
+  const milesMatch = fullText.match(/(?:total\s*)?(?:miles?|distance|mileage)[:\s]*([\d,]+\.?\d*)/i)
+    || fullText.match(/([\d,]+\.?\d*)\s*(?:mi(?:les?)?)\b/i)
+  if (milesMatch) result.total_miles = milesMatch[1].replace(/,/g, '')
+
+  // Stops patterns
+  const stopsMatch = fullText.match(/(?:stops?|total\s*stops?)[:\s]*(\d+)/i)
+  if (stopsMatch) result.total_stops = parseInt(stopsMatch[1])
+
+  // Driver type
+  if (/\bteam\b/i.test(fullText)) result.driver_type = 'team'
+  else if (/\bsolo\b/i.test(fullText)) result.driver_type = 'solo'
+
+  // Load type
+  if (/\blive\s*(un)?load/i.test(fullText)) result.load_type = 'live'
+  else if (/\bdrop\b/i.test(fullText)) result.load_type = 'drop'
+
+  // Direction
+  if (/round\s*trip/i.test(fullText)) result.direction = 'round_trip'
+
+  // US States list for matching
+  const usStates = {
+    'alabama': 'AL', 'alaska': 'AK', 'arizona': 'AZ', 'arkansas': 'AR', 'california': 'CA',
+    'colorado': 'CO', 'connecticut': 'CT', 'delaware': 'DE', 'florida': 'FL', 'georgia': 'GA',
+    'hawaii': 'HI', 'idaho': 'ID', 'illinois': 'IL', 'indiana': 'IN', 'iowa': 'IA',
+    'kansas': 'KS', 'kentucky': 'KY', 'louisiana': 'LA', 'maine': 'ME', 'maryland': 'MD',
+    'massachusetts': 'MA', 'michigan': 'MI', 'minnesota': 'MN', 'mississippi': 'MS', 'missouri': 'MO',
+    'montana': 'MT', 'nebraska': 'NE', 'nevada': 'NV', 'new hampshire': 'NH', 'new jersey': 'NJ',
+    'new mexico': 'NM', 'new york': 'NY', 'north carolina': 'NC', 'north dakota': 'ND', 'ohio': 'OH',
+    'oklahoma': 'OK', 'oregon': 'OR', 'pennsylvania': 'PA', 'rhode island': 'RI', 'south carolina': 'SC',
+    'south dakota': 'SD', 'tennessee': 'TN', 'texas': 'TX', 'utah': 'UT', 'vermont': 'VT',
+    'virginia': 'VA', 'washington': 'WA', 'west virginia': 'WV', 'wisconsin': 'WI', 'wyoming': 'WY',
+  }
+  const stateAbbrevs = new Set(Object.values(usStates))
+
+  // City, State patterns - look for "Origin: City, ST" / "Destination: City, ST" or "Pickup: City, ST" / "Delivery: City, ST"
+  const originMatch = fullText.match(/(?:origin|pickup|pick[\s-]*up|from|shipper)[:\s]*([A-Za-z\s.'-]+?),\s*([A-Z]{2})\b/i)
+  if (originMatch) {
+    result.origin_city = originMatch[1].trim()
+    const st = originMatch[2].toUpperCase()
+    if (stateAbbrevs.has(st)) result.origin_state = st
+  }
+
+  const destMatch = fullText.match(/(?:destination|delivery|deliver|to|consignee|receiver)[:\s]*([A-Za-z\s.'-]+?),\s*([A-Z]{2})\b/i)
+  if (destMatch) {
+    result.destination_city = destMatch[1].trim()
+    const st = destMatch[2].toUpperCase()
+    if (stateAbbrevs.has(st)) result.destination_state = st
+  }
+
+  // If no labeled city/state, try to find "City, ST" patterns generically
+  if (!result.origin_city) {
+    const cityStateMatches = [...fullText.matchAll(/([A-Z][a-zA-Z\s.'-]{1,25}),\s*([A-Z]{2})\b/g)]
+    if (cityStateMatches.length >= 2) {
+      result.origin_city = cityStateMatches[0][1].trim()
+      result.origin_state = cityStateMatches[0][2]
+      result.destination_city = cityStateMatches[1][1].trim()
+      result.destination_state = cityStateMatches[1][2]
+    } else if (cityStateMatches.length === 1) {
+      result.origin_city = cityStateMatches[0][1].trim()
+      result.origin_state = cityStateMatches[0][2]
+    }
+  }
+
+  // Date/time patterns: "MM/DD/YYYY HH:MM", "YYYY-MM-DD HH:MM", "Mon DD, YYYY HH:MM"
+  const datePatterns = [
+    /(\d{1,2}\/\d{1,2}\/\d{2,4})\s*(?:@|at)?\s*(\d{1,2}:\d{2}(?:\s*[AP]M)?)/gi,
+    /(\d{4}-\d{2}-\d{2})\s*[T\s]?\s*(\d{1,2}:\d{2})/gi,
+    /([A-Z][a-z]{2}\s+\d{1,2},?\s*\d{4})\s*(?:@|at)?\s*(\d{1,2}:\d{2}(?:\s*[AP]M)?)/gi,
+  ]
+
+  const foundDates = []
+  for (const pattern of datePatterns) {
+    let match
+    while ((match = pattern.exec(fullText)) !== null) {
+      try {
+        const dateStr = match[1] + ' ' + match[2]
+        const d = new Date(dateStr)
+        if (!isNaN(d.getTime())) {
+          const iso = d.getFullYear() + '-' +
+            String(d.getMonth() + 1).padStart(2, '0') + '-' +
+            String(d.getDate()).padStart(2, '0') + 'T' +
+            String(d.getHours()).padStart(2, '0') + ':' +
+            String(d.getMinutes()).padStart(2, '0')
+          foundDates.push(iso)
+        }
+      } catch { /* skip bad dates */ }
+    }
+  }
+
+  if (foundDates.length >= 2) {
+    result.origin_datetime = foundDates[0]
+    result.destination_datetime = foundDates[1]
+  } else if (foundDates.length === 1) {
+    result.origin_datetime = foundDates[0]
+  }
+
+  // Return null if we got basically nothing useful
+  const usefulKeys = Object.keys(result).filter(k => result[k])
+  if (usefulKeys.length < 2) return null
+
+  return result
+}
+
+const matchFacilities = (parsed) => {
+  // Try to fuzzy-match origin/destination facility from city names
+  if (!facilitiesList.value.length) return
+  const tryMatch = (city, state) => {
+    if (!city) return null
+    const search = (city + ' ' + (state || '')).toLowerCase()
+    const match = facilitiesList.value.find(f => {
+      const name = (f.name || '').toLowerCase()
+      const fCity = (f.city || '').toLowerCase()
+      return name.includes(city.toLowerCase()) || fCity.includes(city.toLowerCase()) || search.includes(fCity)
+    })
+    return match?.id || null
+  }
+  const originFac = tryMatch(parsed.origin_city, parsed.origin_state)
+  if (originFac) form.value.origin_facility = originFac
+  const destFac = tryMatch(parsed.destination_city, parsed.destination_state)
+  if (destFac) form.value.destination_facility = destFac
 }
 
 // Helpers
@@ -1217,6 +1429,53 @@ onMounted(() => {
           </VBtn>
         </div>
         <VCardText class="dialog-body">
+          <!-- Image Upload / OCR Zone -->
+          <div
+            class="ocr-dropzone"
+            :class="{ dragging: isDragging, 'has-image': ocrImagePreview }"
+            @dragover.prevent="isDragging = true"
+            @dragleave.prevent="isDragging = false"
+            @drop.prevent="handleImageDrop"
+            @click="imageInputRef?.click()"
+          >
+            <input
+              ref="imageInputRef"
+              type="file"
+              accept="image/*"
+              hidden
+              @change="handleImageSelect"
+            />
+            <div v-if="ocrLoading" class="ocr-loading">
+              <div class="ocr-progress-ring">
+                <svg viewBox="0 0 48 48">
+                  <circle cx="24" cy="24" r="20" fill="none" stroke="currentColor" stroke-width="3" opacity="0.15" />
+                  <circle cx="24" cy="24" r="20" fill="none" stroke="currentColor" stroke-width="3"
+                    stroke-dasharray="125.6"
+                    :stroke-dashoffset="125.6 - (125.6 * ocrProgress / 100)"
+                    stroke-linecap="round"
+                    style="transition: stroke-dashoffset 0.3s ease;"
+                  />
+                </svg>
+                <span class="ocr-percent">{{ ocrProgress }}%</span>
+              </div>
+              <span class="ocr-status">Scanning image...</span>
+            </div>
+            <template v-else-if="ocrImagePreview">
+              <img :src="ocrImagePreview" class="ocr-preview-img" alt="Uploaded load" />
+              <div class="ocr-overlay">
+                <VIcon icon="bx-check-circle" size="24" />
+                <span>Scanned! Click or drop to rescan</span>
+              </div>
+            </template>
+            <template v-else>
+              <div class="ocr-placeholder">
+                <VIcon icon="bx-image-add" size="36" />
+                <span class="ocr-title">Drop load image here</span>
+                <span class="ocr-hint">or click to browse — auto-fills the form via OCR</span>
+              </div>
+            </template>
+          </div>
+
           <div class="form-section-title">Identification</div>
           <div class="form-grid">
             <div class="form-group">
@@ -1688,7 +1947,7 @@ onMounted(() => {
 
 /* Expanded Card */
 .load-card { cursor: pointer; }
-.load-card.is-expanded { border-color: rgba(99,102,241,0.4); background: var(--card-bg); }
+.load-card.is-expanded { border-color: rgba(99,102,241,0.4); background: var(--card-bg); grid-column: 1 / -1; }
 .load-card.is-expanded:hover { transform: none; }
 
 .expanded-panel { margin-top: 16px; padding-top: 20px; border-top: 1px solid var(--border-line); animation: expandPanel 0.3s ease; }
@@ -1721,9 +1980,42 @@ onMounted(() => {
 .active-page { background: linear-gradient(135deg, #6366f1, #8b5cf6) !important; color: white !important; }
 .page-ellipsis { color: var(--text-muted); padding: 0 8px; }
 
+/* OCR Dropzone */
+.ocr-dropzone {
+  position: relative;
+  border: 2px dashed var(--card-border);
+  border-radius: 16px;
+  padding: 24px;
+  margin-bottom: 20px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  overflow: hidden;
+  min-height: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--input-bg);
+}
+.ocr-dropzone:hover { border-color: var(--primary); background: rgba(99, 102, 241, 0.05); }
+.ocr-dropzone.dragging { border-color: var(--primary); background: rgba(99, 102, 241, 0.1); border-style: solid; transform: scale(1.01); }
+.ocr-dropzone.has-image { padding: 0; border-style: solid; border-color: rgba(16, 185, 129, 0.3); }
+.ocr-placeholder { display: flex; flex-direction: column; align-items: center; gap: 6px; color: var(--text-muted); text-align: center; }
+.ocr-placeholder .v-icon { color: var(--primary-light); opacity: 0.7; }
+.ocr-title { font-size: 14px; font-weight: 600; color: var(--text-secondary); }
+.ocr-hint { font-size: 12px; color: var(--text-muted); }
+.ocr-loading { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px; }
+.ocr-progress-ring { position: relative; width: 48px; height: 48px; color: var(--primary); }
+.ocr-progress-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.ocr-percent { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: var(--text-heading); }
+.ocr-status { font-size: 13px; font-weight: 600; color: var(--primary-light); }
+.ocr-preview-img { width: 100%; max-height: 160px; object-fit: cover; display: block; border-radius: 14px; }
+.ocr-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; background: rgba(16, 185, 129, 0.85); color: white; font-size: 13px; font-weight: 600; opacity: 0; transition: opacity 0.2s; border-radius: 14px; }
+.ocr-dropzone.has-image:hover .ocr-overlay { opacity: 1; }
+
 /* Dialogs */
 .custom-dialog :deep(.v-overlay__content) { margin: 16px; }
-.dialog-card { background: var(--dialog-bg) !important; border: 1px solid var(--dialog-border); border-radius: 24px !important; overflow: hidden; }
+.custom-dialog :deep(.v-overlay__scrim) { background: rgba(0, 0, 0, 0.85) !important; }
+.dialog-card { background: var(--dialog-bg) !important; border: 1px solid var(--dialog-border); border-radius: 24px !important; overflow: hidden; backdrop-filter: none !important; }
 .dialog-header { display: flex; align-items: flex-start; gap: 16px; padding: 24px 24px 0; position: relative; }
 .dialog-icon { display: flex; align-items: center; justify-content: center; width: 52px; height: 52px; border-radius: 14px; flex-shrink: 0; }
 .dialog-icon.create { background: linear-gradient(135deg, rgba(16,185,129,0.2), rgba(6,182,212,0.2)); color: #34d399; }
