@@ -2,8 +2,8 @@
 
 import api from './api'
 
-const BASE = '/admin-api'
-const ANALYTICS = '/admins-api'
+const BASE = '/api'
+const ANALYTICS = '/admin-api'
 
 export const loadService = {
   list: (params) => api.get(`${BASE}/loads`, { params }).then(r => r.data),
@@ -14,7 +14,7 @@ export const loadService = {
   cancel: (id) => api.post(`${BASE}/loads/${id}/cancel`).then(r => r.data),
   updateStatus: (id, status) => api.post(`${BASE}/loads/${id}/status`, { status }).then(r => r.data),
 
-  // Analytics (admins-api prefix)
+  // Analytics (admin-api prefix)
   analyticsOverview: () => api.get(`${ANALYTICS}/analytics/overview`).then(r => r.data),
   loadFrequency: (params) => api.get(`${ANALYTICS}/analytics/loads/frequency`, { params }).then(r => r.data),
 }

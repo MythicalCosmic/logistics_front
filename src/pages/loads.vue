@@ -84,6 +84,50 @@ const showCreateDialog = ref(false)
 const showEditDialog = ref(false)
 const showCancelDialog = ref(false)
 const dialogLoading = ref(false)
+const expandedLoadId = ref(null)
+const groupByLoadId = ref(false)
+const expandedGroups = ref({})
+
+const toggleLoadExpand = (loadId) => {
+  expandedLoadId.value = expandedLoadId.value === loadId ? null : loadId
+}
+
+const toggleGroupExpand = (groupId) => {
+  expandedGroups.value = { ...expandedGroups.value, [groupId]: !expandedGroups.value[groupId] }
+}
+
+const groupedLoads = computed(() => {
+  if (!groupByLoadId.value) return null
+  const groups = {}
+  loads.value.forEach(load => {
+    const key = load.load_id || `single_${load.id}`
+    if (!groups[key]) {
+      groups[key] = { load_id: key, loads: [], totalPayout: 0, totalMiles: 0 }
+    }
+    groups[key].loads.push(load)
+    groups[key].totalPayout += parseFloat(load.payout || 0)
+    groups[key].totalMiles += parseFloat(load.total_miles || 0)
+  })
+  return Object.values(groups)
+    .filter(g => g.loads.length > 0)
+    .sort((a, b) => b.loads.length - a.loads.length)
+})
+
+const getRatePerMile = (load) => {
+  const payout = parseFloat(load.payout || 0)
+  const miles = parseFloat(load.total_miles || 0)
+  if (!miles) return '-'
+  return '$' + (payout / miles).toFixed(2)
+}
+
+const getTimeDiff = (start, end) => {
+  if (!start || !end) return '-'
+  const diff = new Date(end) - new Date(start)
+  const hours = Math.floor(diff / 3600000)
+  const mins = Math.floor((diff % 3600000) / 60000)
+  if (hours > 0) return `${hours}h ${mins}m`
+  return `${mins}m`
+}
 
 // Form Data
 const defaultForm = {
@@ -210,7 +254,7 @@ const fetchLoads = async () => {
     if (search.value) params.append('search', search.value)
     if (filterStatus.value) params.append('status', filterStatus.value)
 
-    const response = await api.get(`/admin-api/loads?${params}`)
+    const response = await api.get(`/api/loads?${params}`)
     if (response.data.success) {
       loads.value = response.data.data?.loads || []
       totalLoads.value = response.data.data?.pagination?.total || 0
@@ -225,7 +269,7 @@ const fetchLoads = async () => {
 
 const fetchStats = async () => {
   try {
-    const response = await api.get('/admin-api/loads/stats')
+    const response = await api.get('/api/loads/stats')
     if (response.data.success) {
       serverStats.value = response.data.data
     }
@@ -245,9 +289,9 @@ const fetchAnalytics = async () => {
   analyticsLoading.value = true
   try {
     const [overviewRes, weekRes, monthRes] = await Promise.allSettled([
-      api.get('/admins-api/analytics/overview'),
-      api.get('/admins-api/analytics/loads/frequency', { params: { period: '7d', min_count: 1 } }),
-      api.get('/admins-api/analytics/loads/frequency', { params: { period: '30d', min_count: 1 } }),
+      api.get('/admin-api/analytics/overview'),
+      api.get('/admin-api/analytics/loads/frequency', { params: { period: '7d', min_count: 1 } }),
+      api.get('/admin-api/analytics/loads/frequency', { params: { period: '30d', min_count: 1 } }),
     ])
 
     if (overviewRes.status === 'fulfilled' && overviewRes.value.data.success) {
@@ -277,7 +321,7 @@ const handleCreate = async () => {
 
   dialogLoading.value = true
   try {
-    const response = await api.post('/admin-api/loads/create', {
+    const response = await api.post('/api/loads/create', {
       load_id: form.value.load_id || '',
       tour_id: form.value.tour_id || '',
       origin_facility: form.value.origin_facility,
@@ -322,7 +366,7 @@ const handleUpdate = async () => {
 
   dialogLoading.value = true
   try {
-    const response = await api.put(`/admin-api/loads/${selectedLoad.value.id}/update`, {
+    const response = await api.put(`/api/loads/${selectedLoad.value.id}/update`, {
       load_id: form.value.load_id || '',
       tour_id: form.value.tour_id || '',
       origin_facility: form.value.origin_facility,
@@ -356,7 +400,7 @@ const handleCancel = async () => {
   if (!selectedLoad.value) return
   dialogLoading.value = true
   try {
-    const response = await api.post(`/admin-api/loads/${selectedLoad.value.id}/cancel`)
+    const response = await api.post(`/api/loads/${selectedLoad.value.id}/cancel`)
     if (response.data.success) {
       toastSuccess('Load cancelled successfully')
       showCancelDialog.value = false
@@ -371,7 +415,7 @@ const handleCancel = async () => {
 // Change status
 const handleStatusChange = async (load, newStatus) => {
   try {
-    const response = await api.post(`/admin-api/loads/${load.id}/status`, { status: newStatus })
+    const response = await api.post(`/api/loads/${load.id}/status`, { status: newStatus })
     if (response.data.success) {
       toastSuccess(`Status updated to ${formatStatus(newStatus)}`)
       fetchLoads()
@@ -690,6 +734,15 @@ onMounted(() => {
             </template>
           </VSelect>
         </div>
+        <VBtn
+          variant="tonal"
+          class="group-btn"
+          :class="{ active: groupByLoadId }"
+          @click="groupByLoadId = !groupByLoadId"
+        >
+          <VIcon :icon="groupByLoadId ? 'bx-layer' : 'bx-collection'" class="me-2" />
+          {{ groupByLoadId ? 'Grouped' : 'Group' }}
+        </VBtn>
         <VBtn variant="tonal" class="clear-btn" @click="search = ''; filterStatus = null; sortBy = '-created_at'">
           <VIcon icon="bx-refresh" class="me-2" />
           Reset
@@ -714,17 +767,172 @@ onMounted(() => {
         </VBtn>
       </div>
 
+      <!-- Grouped View -->
+      <div v-else-if="groupByLoadId && groupedLoads" class="grouped-view">
+        <div
+          v-for="(group, gIdx) in groupedLoads"
+          :key="group.load_id"
+          class="load-group"
+          :style="{ '--delay': `${gIdx * 0.05}s` }"
+        >
+          <div class="group-header" @click="toggleGroupExpand(group.load_id)">
+            <div class="group-header-left">
+              <div class="group-icon">
+                <VIcon icon="bx-layer" size="20" />
+                <span class="group-count-badge">{{ group.loads.length }}</span>
+              </div>
+              <div class="group-info">
+                <span class="group-id">{{ group.load_id }}</span>
+                <span class="group-subtitle">{{ group.loads.length }} load{{ group.loads.length > 1 ? 's' : '' }} with this ID</span>
+              </div>
+            </div>
+            <div class="group-header-right">
+              <div class="group-stat">
+                <span class="group-stat-label">Total Payout</span>
+                <span class="group-stat-value money">{{ formatMoney(group.totalPayout) }}</span>
+              </div>
+              <div class="group-stat">
+                <span class="group-stat-label">Total Miles</span>
+                <span class="group-stat-value">{{ group.totalMiles.toLocaleString() }} mi</span>
+              </div>
+              <div class="group-stat">
+                <span class="group-stat-label">Avg Payout</span>
+                <span class="group-stat-value">{{ formatMoney(group.totalPayout / group.loads.length) }}</span>
+              </div>
+              <VIcon :icon="expandedGroups[group.load_id] ? 'bx-chevron-up' : 'bx-chevron-down'" size="22" class="group-chevron" />
+            </div>
+          </div>
+
+          <!-- Group status summary -->
+          <div class="group-status-bar">
+            <span
+              v-for="status in ['available', 'booked', 'in_transit', 'delivered', 'cancelled']"
+              :key="status"
+              v-show="group.loads.filter(l => l.status === status).length > 0"
+              class="group-status-chip"
+              :style="{ background: getStatusColor(status).bg, color: getStatusColor(status).text, borderColor: getStatusColor(status).border }"
+            >
+              {{ formatStatus(status) }}: {{ group.loads.filter(l => l.status === status).length }}
+            </span>
+          </div>
+
+          <!-- Expanded group loads -->
+          <div v-if="expandedGroups[group.load_id]" class="group-loads">
+            <div
+              v-for="(load, index) in group.loads"
+              :key="load.id"
+              class="load-card in-group"
+              :class="{ 'is-expanded': expandedLoadId === load.id }"
+              :style="{ '--delay': `${index * 0.03}s` }"
+              @click="toggleLoadExpand(load.id)"
+            >
+              <div class="card-glow"></div>
+              <div class="load-header" @click.stop>
+                <div class="load-id-section">
+                  <span class="load-id-label">{{ load.load_id || `#${load.id}` }}</span>
+                  <span v-if="load.tour_id" class="tour-id">Tour: {{ load.tour_id }}</span>
+                </div>
+                <div class="header-right">
+                  <span class="status-badge" :style="{ background: getStatusColor(load.status).bg, color: getStatusColor(load.status).text, borderColor: getStatusColor(load.status).border }">
+                    <VIcon :icon="getStatusIcon(load.status)" size="14" class="me-1" />
+                    {{ formatStatus(load.status) }}
+                  </span>
+                  <VMenu location="bottom end" :close-on-content-click="true">
+                    <template #activator="{ props }">
+                      <VBtn v-bind="props" icon variant="text" class="menu-btn" @click.stop>
+                        <VIcon icon="bx-dots-vertical-rounded" />
+                      </VBtn>
+                    </template>
+                    <VList class="action-menu">
+                      <VListItem v-if="canEditLoad(load)" @click="openEditDialog(load)">
+                        <template #prepend><VIcon icon="bx-edit" color="primary" /></template>
+                        <VListItemTitle>Edit Load</VListItemTitle>
+                      </VListItem>
+                      <template v-for="transition in getAvailableTransitions(load)" :key="transition.value">
+                        <VListItem v-if="canEdit" @click="handleStatusChange(load, transition.value)">
+                          <template #prepend><VIcon :icon="transition.icon" :color="transition.value === 'cancelled' ? 'error' : 'info'" /></template>
+                          <VListItemTitle :class="{ 'text-error': transition.value === 'cancelled' }">{{ transition.label }}</VListItemTitle>
+                        </VListItem>
+                      </template>
+                    </VList>
+                  </VMenu>
+                </div>
+              </div>
+              <div class="load-route">
+                <div class="route-point origin">
+                  <div class="route-dot"></div>
+                  <div class="route-info">
+                    <span class="route-facility">{{ getFacilityShort(load.origin_facility) }}</span>
+                    <span class="route-location">{{ [load.origin_city, load.origin_state].filter(Boolean).join(', ') || 'Origin' }}</span>
+                  </div>
+                  <span class="route-time">{{ formatDateTime(load.origin_datetime) }}</span>
+                </div>
+                <div class="route-line">
+                  <div class="route-line-inner"></div>
+                  <span class="route-miles">{{ parseFloat(load.total_miles || 0).toLocaleString() }} mi</span>
+                </div>
+                <div class="route-point destination">
+                  <div class="route-dot dest"></div>
+                  <div class="route-info">
+                    <span class="route-facility">{{ getFacilityShort(load.destination_facility) }}</span>
+                    <span class="route-location">{{ [load.destination_city, load.destination_state].filter(Boolean).join(', ') || 'Destination' }}</span>
+                  </div>
+                  <span class="route-time">{{ formatDateTime(load.destination_datetime) }}</span>
+                </div>
+              </div>
+              <div class="load-details">
+                <div class="detail-chip payout"><VIcon icon="bx-dollar" size="16" /><span>{{ formatMoney(load.payout) }}</span></div>
+                <div class="detail-chip"><VIcon icon="bx-map-pin" size="16" /><span>{{ load.total_stops }} stops</span></div>
+                <div class="detail-chip"><VIcon icon="bx-user" size="16" /><span class="text-capitalize">{{ load.driver_type }}</span></div>
+                <div class="detail-chip"><VIcon icon="bx-transfer-alt" size="16" /><span class="text-capitalize">{{ load.load_type }}</span></div>
+              </div>
+              <div class="load-footer">
+                <div class="footer-item"><VIcon icon="bx-calendar" size="16" /><span>{{ formatDate(load.created_at) }}</span></div>
+                <div v-if="load.rate_per_mile" class="footer-item"><span class="rate-badge">${{ parseFloat(load.rate_per_mile).toFixed(2) }}/mi</span></div>
+              </div>
+              <div class="expand-hint">
+                <VIcon :icon="expandedLoadId === load.id ? 'bx-chevron-up' : 'bx-chevron-down'" size="18" />
+                <span>{{ expandedLoadId === load.id ? 'Less' : 'Details' }}</span>
+              </div>
+              <div v-if="expandedLoadId === load.id" class="expanded-panel" @click.stop>
+                <div class="expanded-grid">
+                  <div class="expanded-section">
+                    <div class="expanded-section-title"><VIcon icon="bx-dollar-circle" size="16" /><span>Financial</span></div>
+                    <div class="expanded-stats">
+                      <div class="estat"><span class="estat-label">Payout</span><span class="estat-value money">{{ formatMoney(load.payout) }}</span></div>
+                      <div class="estat"><span class="estat-label">Rate / Mile</span><span class="estat-value">{{ getRatePerMile(load) }}</span></div>
+                      <div class="estat"><span class="estat-label">Total Miles</span><span class="estat-value">{{ parseFloat(load.total_miles || 0).toLocaleString() }}</span></div>
+                    </div>
+                  </div>
+                  <div class="expanded-section">
+                    <div class="expanded-section-title"><VIcon icon="bx-time" size="16" /><span>Schedule</span></div>
+                    <div class="expanded-stats">
+                      <div class="estat"><span class="estat-label">Pickup</span><span class="estat-value">{{ formatDateTime(load.origin_datetime) }}</span></div>
+                      <div class="estat"><span class="estat-label">Delivery</span><span class="estat-value">{{ formatDateTime(load.destination_datetime) }}</span></div>
+                      <div class="estat"><span class="estat-label">Transit</span><span class="estat-value">{{ getTimeDiff(load.origin_datetime, load.destination_datetime) }}</span></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Regular View -->
       <div v-else class="loads-grid">
         <div
           v-for="(load, index) in loads"
           :key="load.id"
           class="load-card"
+          :class="{ 'is-expanded': expandedLoadId === load.id }"
           :style="{ '--delay': `${index * 0.04}s` }"
+          @click="toggleLoadExpand(load.id)"
         >
           <div class="card-glow"></div>
 
           <!-- Card Header -->
-          <div class="load-header">
+          <div class="load-header" @click.stop>
             <div class="load-id-section">
               <span class="load-id-label">{{ load.load_id || `#${load.id}` }}</span>
               <span v-if="load.tour_id" class="tour-id">Tour: {{ load.tour_id }}</span>
@@ -832,17 +1040,139 @@ onMounted(() => {
 
           <!-- Quick Actions (Mobile) -->
           <div class="quick-actions">
-            <VBtn v-if="canEditLoad(load)" icon size="small" variant="tonal" color="primary" @click="openEditDialog(load)">
+            <VBtn v-if="canEditLoad(load)" icon size="small" variant="tonal" color="primary" @click.stop="openEditDialog(load)">
               <VIcon icon="bx-edit" size="18" />
             </VBtn>
             <template v-for="t in getAvailableTransitions(load)" :key="t.value">
-              <VBtn v-if="canEdit && t.value !== 'cancelled'" icon size="small" variant="tonal" :color="t.value === 'delivered' ? 'success' : 'info'" @click="handleStatusChange(load, t.value)">
+              <VBtn v-if="canEdit && t.value !== 'cancelled'" icon size="small" variant="tonal" :color="t.value === 'delivered' ? 'success' : 'info'" @click.stop="handleStatusChange(load, t.value)">
                 <VIcon :icon="t.icon" size="18" />
               </VBtn>
             </template>
-            <VBtn v-if="canEditLoad(load)" icon size="small" variant="tonal" color="error" @click="openCancelDialog(load)">
+            <VBtn v-if="canEditLoad(load)" icon size="small" variant="tonal" color="error" @click.stop="openCancelDialog(load)">
               <VIcon icon="bx-x-circle" size="18" />
             </VBtn>
+          </div>
+
+          <!-- Expand Indicator -->
+          <div class="expand-hint">
+            <VIcon :icon="expandedLoadId === load.id ? 'bx-chevron-up' : 'bx-chevron-down'" size="18" />
+            <span>{{ expandedLoadId === load.id ? 'Less' : 'Details' }}</span>
+          </div>
+
+          <!-- Expanded Details Panel -->
+          <div v-if="expandedLoadId === load.id" class="expanded-panel" @click.stop>
+            <div class="expanded-grid">
+              <!-- Financial -->
+              <div class="expanded-section">
+                <div class="expanded-section-title">
+                  <VIcon icon="bx-dollar-circle" size="16" />
+                  <span>Financial</span>
+                </div>
+                <div class="expanded-stats">
+                  <div class="estat">
+                    <span class="estat-label">Payout</span>
+                    <span class="estat-value money">{{ formatMoney(load.payout) }}</span>
+                  </div>
+                  <div class="estat">
+                    <span class="estat-label">Rate / Mile</span>
+                    <span class="estat-value">{{ getRatePerMile(load) }}</span>
+                  </div>
+                  <div class="estat">
+                    <span class="estat-label">Total Miles</span>
+                    <span class="estat-value">{{ parseFloat(load.total_miles || 0).toLocaleString() }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Route Details -->
+              <div class="expanded-section">
+                <div class="expanded-section-title">
+                  <VIcon icon="bx-map" size="16" />
+                  <span>Route Details</span>
+                </div>
+                <div class="expanded-stats">
+                  <div class="estat">
+                    <span class="estat-label">Origin Facility</span>
+                    <span class="estat-value">{{ getFacilityDisplay(load.origin_facility) }}</span>
+                  </div>
+                  <div class="estat">
+                    <span class="estat-label">Destination Facility</span>
+                    <span class="estat-value">{{ getFacilityDisplay(load.destination_facility) }}</span>
+                  </div>
+                  <div class="estat">
+                    <span class="estat-label">Transit Time</span>
+                    <span class="estat-value">{{ getTimeDiff(load.origin_datetime, load.destination_datetime) }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Timing -->
+              <div class="expanded-section">
+                <div class="expanded-section-title">
+                  <VIcon icon="bx-time" size="16" />
+                  <span>Schedule</span>
+                </div>
+                <div class="expanded-stats">
+                  <div class="estat">
+                    <span class="estat-label">Pickup</span>
+                    <span class="estat-value">{{ formatDateTime(load.origin_datetime) }}</span>
+                  </div>
+                  <div class="estat">
+                    <span class="estat-label">Delivery</span>
+                    <span class="estat-value">{{ formatDateTime(load.destination_datetime) }}</span>
+                  </div>
+                  <div class="estat">
+                    <span class="estat-label">Created</span>
+                    <span class="estat-value">{{ formatDate(load.created_at) }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Load Info -->
+              <div class="expanded-section">
+                <div class="expanded-section-title">
+                  <VIcon icon="bx-info-circle" size="16" />
+                  <span>Load Info</span>
+                </div>
+                <div class="expanded-stats">
+                  <div class="estat">
+                    <span class="estat-label">Direction</span>
+                    <span class="estat-value text-capitalize">{{ (load.direction || 'one_way').replace(/_/g, ' ') }}</span>
+                  </div>
+                  <div class="estat">
+                    <span class="estat-label">Driver Type</span>
+                    <span class="estat-value text-capitalize">{{ load.driver_type || 'solo' }}</span>
+                  </div>
+                  <div class="estat">
+                    <span class="estat-label">Load Type</span>
+                    <span class="estat-value text-capitalize">{{ load.load_type || 'drop' }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Driver Info -->
+            <div v-if="load.assigned_driver" class="expanded-driver">
+              <VIcon icon="bx-user-check" size="18" />
+              <div>
+                <span class="driver-name">{{ load.assigned_driver.full_name }}</span>
+                <span v-if="load.assigned_driver.email" class="driver-email">{{ load.assigned_driver.email }}</span>
+              </div>
+            </div>
+
+            <!-- Quick Actions in expanded -->
+            <div class="expanded-actions">
+              <VBtn v-if="canEditLoad(load)" variant="tonal" color="primary" size="small" @click.stop="openEditDialog(load)">
+                <VIcon icon="bx-edit" size="16" class="me-1" />
+                Edit
+              </VBtn>
+              <template v-for="t in getAvailableTransitions(load)" :key="t.value">
+                <VBtn v-if="canEdit" variant="tonal" :color="t.value === 'cancelled' ? 'error' : 'info'" size="small" @click.stop="handleStatusChange(load, t.value)">
+                  <VIcon :icon="t.icon" size="16" class="me-1" />
+                  {{ t.label }}
+                </VBtn>
+              </template>
+            </div>
           </div>
         </div>
       </div>
@@ -1266,6 +1596,30 @@ onMounted(() => {
 .search-input :deep(.v-field), .filter-select :deep(.v-field) { background: var(--input-bg); border-radius: 12px; }
 .search-icon { color: var(--text-secondary); }
 .clear-btn { height: 48px !important; border-radius: 12px !important; flex-shrink: 0; }
+.group-btn { height: 48px !important; border-radius: 12px !important; flex-shrink: 0; transition: all 0.3s ease; }
+.group-btn.active { background: linear-gradient(135deg, rgba(99,102,241,0.2), rgba(139,92,246,0.2)) !important; color: #818cf8 !important; border: 1px solid rgba(99,102,241,0.3) !important; }
+
+/* Grouped View */
+.grouped-view { display: flex; flex-direction: column; gap: 16px; }
+.load-group { background: var(--card-bg-subtle); border: 1px solid var(--card-border); border-radius: 18px; overflow: hidden; animation: fadeUp 0.4s ease-out both; animation-delay: var(--delay); }
+.group-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 22px; cursor: pointer; transition: background 0.2s; gap: 16px; }
+.group-header:hover { background: var(--hover-bg); }
+.group-header-left { display: flex; align-items: center; gap: 14px; }
+.group-icon { position: relative; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, rgba(99,102,241,0.15), rgba(139,92,246,0.15)); border-radius: 12px; color: #818cf8; }
+.group-count-badge { position: absolute; top: -6px; right: -6px; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; font-size: 11px; font-weight: 700; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(99,102,241,0.4); }
+.group-info { display: flex; flex-direction: column; gap: 2px; }
+.group-id { font-size: 16px; font-weight: 700; color: var(--text-heading); font-family: 'JetBrains Mono', monospace; }
+.group-subtitle { font-size: 12px; color: var(--text-muted); }
+.group-header-right { display: flex; align-items: center; gap: 20px; }
+.group-stat { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+.group-stat-label { font-size: 10px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.3px; }
+.group-stat-value { font-size: 14px; font-weight: 700; color: var(--text-heading); }
+.group-stat-value.money { color: #10b981; }
+.group-chevron { color: var(--text-muted); transition: transform 0.3s ease; }
+.group-status-bar { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 22px 14px; }
+.group-status-chip { font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 8px; border: 1px solid; }
+.group-loads { padding: 8px 16px 16px; display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); gap: 12px; border-top: 1px solid var(--border-line); }
+.load-card.in-group { border-radius: 14px; }
 
 /* Loads Container */
 .loads-container { background: var(--surface-bg); backdrop-filter: blur(20px); border: 1px solid var(--card-border); border-radius: 24px; padding: 24px; min-height: 400px; }
@@ -1326,6 +1680,35 @@ onMounted(() => {
 
 /* Quick Actions */
 .quick-actions { display: none; gap: 8px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-line); }
+
+/* Expand Hint */
+.expand-hint { display: flex; align-items: center; justify-content: center; gap: 4px; margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--border-line); font-size: 12px; color: var(--text-muted); cursor: pointer; transition: color 0.2s; }
+.expand-hint:hover { color: var(--primary-light); }
+.load-card.is-expanded .expand-hint { color: var(--primary-light); }
+
+/* Expanded Card */
+.load-card { cursor: pointer; }
+.load-card.is-expanded { border-color: rgba(99,102,241,0.4); background: var(--card-bg); }
+.load-card.is-expanded:hover { transform: none; }
+
+.expanded-panel { margin-top: 16px; padding-top: 20px; border-top: 1px solid var(--border-line); animation: expandPanel 0.3s ease; }
+@keyframes expandPanel { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+
+.expanded-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+.expanded-section { background: var(--hover-bg); border-radius: 12px; padding: 14px; }
+.expanded-section-title { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; color: var(--primary-light); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+.expanded-stats { display: flex; flex-direction: column; gap: 8px; }
+.estat { display: flex; justify-content: space-between; align-items: center; }
+.estat-label { font-size: 12px; color: var(--text-muted); }
+.estat-value { font-size: 13px; font-weight: 700; color: var(--text-heading); text-align: right; max-width: 60%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.estat-value.money { color: #34d399; }
+
+.expanded-driver { display: flex; align-items: center; gap: 12px; margin-top: 14px; padding: 12px; background: rgba(99,102,241,0.08); border-radius: 10px; color: var(--primary-light); }
+.driver-name { display: block; font-size: 14px; font-weight: 600; color: var(--text-heading); }
+.driver-email { display: block; font-size: 12px; color: var(--text-muted); }
+
+.expanded-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-line); }
 
 /* Pagination */
 .pagination-container { display: flex; justify-content: space-between; align-items: center; margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border-line); flex-wrap: wrap; gap: 16px; }
@@ -1391,9 +1774,14 @@ onMounted(() => {
   .filters-body { flex-direction: column; }
   .filter-item, .search-filter { min-width: 100%; }
   .loads-grid { grid-template-columns: 1fr; }
+  .group-loads { grid-template-columns: 1fr; }
+  .group-header { flex-direction: column; align-items: flex-start; }
+  .group-header-right { width: 100%; justify-content: space-between; }
+  .group-stat { align-items: flex-start; }
   .load-card { padding: 20px; }
   .menu-btn { display: none !important; }
   .quick-actions { display: flex; }
+  .expanded-grid { grid-template-columns: 1fr; }
   .pagination-container { flex-direction: column; text-align: center; }
   .pagination-info { order: 2; }
   .form-grid, .form-grid.cols-3 { grid-template-columns: 1fr; }

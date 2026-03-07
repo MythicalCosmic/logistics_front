@@ -63,7 +63,13 @@ const operationsItems = computed(() => [
     title: 'Facilities',
     icon: 'bx-buildings',
     to: '/facilities',
-    permission: null,
+    permission: 'facilities.view',
+  },
+  {
+    title: 'Analytics',
+    icon: 'bx-bar-chart-alt',
+    to: '/analytics',
+    permission: 'analytics.view',
   },
 ].filter(item => can(item.permission)))
 

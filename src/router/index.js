@@ -41,7 +41,10 @@ const router = createRouter({
           path: 'facilities',
           name: 'facilities',
           component: () => import('../pages/facilities.vue'),
-          meta: { requiresAuth: true },
+          meta: {
+            requiresAuth: true,
+            permissions: ['facilities.view'],
+          },
         },
         {
           path: 'loads',
@@ -50,6 +53,15 @@ const router = createRouter({
           meta: {
             requiresAuth: true,
             permissions: ['loads.view'],
+          },
+        },
+        {
+          path: 'analytics',
+          name: 'analytics',
+          component: () => import('../pages/analytics.vue'),
+          meta: {
+            requiresAuth: true,
+            permissions: ['analytics.view'],
           },
         },
       ],
