@@ -56,6 +56,24 @@ const router = createRouter({
           },
         },
         {
+          path: 'routes',
+          name: 'routes',
+          component: () => import('../pages/routes.vue'),
+          meta: {
+            requiresAuth: true,
+            permissions: ['loads.view'],
+          },
+        },
+        {
+          path: 'states',
+          name: 'states',
+          component: () => import('../pages/states.vue'),
+          meta: {
+            requiresAuth: true,
+            permissions: ['analytics.view'],
+          },
+        },
+        {
           path: 'analytics',
           name: 'analytics',
           component: () => import('../pages/analytics.vue'),

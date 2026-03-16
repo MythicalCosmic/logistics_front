@@ -11,6 +11,12 @@ const authStore = useAuthStore()
 const { success: toastSuccess, error: toastError } = useToast()
 const vuetifyTheme = useTheme()
 const isDark = computed(() => vuetifyTheme.global.current.value.dark)
+const dialogCardStyle = computed(() => ({
+  background: isDark.value ? '#1e1e2e' : '#ffffff',
+  color: isDark.value ? '#e2e8f0' : '#1e293b',
+  border: `1px solid ${isDark.value ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'}`,
+  borderRadius: '16px',
+}))
 
 // Permissions
 const canCreate = computed(() => authStore.hasPermission('users.create'))
@@ -591,7 +597,7 @@ onMounted(() => {
 
     <!-- Create Dialog -->
     <VDialog v-model="showCreateDialog" max-width="550" persistent>
-      <VCard class="dialog-card">
+      <VCard class="dialog-card" :style="dialogCardStyle">
         <VCardTitle class="d-flex align-center pa-5 pb-3" style="gap: 12px;">
           <div class="dialog-icon create"><VIcon icon="bx-user-plus" size="24" /></div>
           <div>
@@ -637,7 +643,7 @@ onMounted(() => {
 
     <!-- Edit Dialog -->
     <VDialog v-model="showEditDialog" max-width="550" persistent>
-      <VCard class="dialog-card">
+      <VCard class="dialog-card" :style="dialogCardStyle">
         <VCardTitle class="d-flex align-center pa-5 pb-3" style="gap: 12px;">
           <div class="dialog-icon edit"><VIcon icon="bx-edit" size="24" /></div>
           <div>
@@ -703,7 +709,7 @@ onMounted(() => {
 
     <!-- Delete Dialog -->
     <VDialog v-model="showDeleteDialog" max-width="420">
-      <VCard class="dialog-card text-center">
+      <VCard class="dialog-card text-center" :style="dialogCardStyle">
         <VCardText class="pa-6">
           <div class="delete-icon-wrap mx-auto mb-4">
             <VIcon icon="bx-error-circle" size="48" color="error" />
@@ -725,7 +731,7 @@ onMounted(() => {
 
     <!-- Change Password Dialog -->
     <VDialog v-model="showPasswordDialog" max-width="420">
-      <VCard class="dialog-card">
+      <VCard class="dialog-card" :style="dialogCardStyle">
         <VCardTitle class="d-flex align-center pa-5 pb-3" style="gap: 12px;">
           <div class="dialog-icon warning"><VIcon icon="bx-key" size="24" /></div>
           <div>
@@ -762,7 +768,7 @@ onMounted(() => {
 
     <!-- Sessions Dialog -->
     <VDialog v-model="showSessionsDialog" max-width="600">
-      <VCard class="dialog-card">
+      <VCard class="dialog-card" :style="dialogCardStyle">
         <VCardTitle class="d-flex align-center pa-5 pb-3" style="gap: 12px;">
           <div class="dialog-icon info"><VIcon icon="bx-devices" size="24" /></div>
           <div>
@@ -803,7 +809,7 @@ onMounted(() => {
 
     <!-- Force Logout Dialog -->
     <VDialog v-model="showForceLogoutDialog" max-width="420">
-      <VCard class="dialog-card text-center">
+      <VCard class="dialog-card text-center" :style="dialogCardStyle">
         <VCardText class="pa-6">
           <div class="delete-icon-wrap warning mx-auto mb-4">
             <VIcon icon="bx-log-out" size="48" color="warning" />

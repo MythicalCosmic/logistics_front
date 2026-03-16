@@ -108,22 +108,8 @@ const toggleGroupExpand = (groupId) => {
   expandedGroups.value = { ...expandedGroups.value, [groupId]: !expandedGroups.value[groupId] }
 }
 
-const groupedLoads = computed(() => {
-  if (!groupByLoadId.value) return null
-  const groups = {}
-  loads.value.forEach(load => {
-    const key = load.load_id || `single_${load.id}`
-    if (!groups[key]) {
-      groups[key] = { load_id: key, loads: [], totalPayout: 0, totalMiles: 0 }
-    }
-    groups[key].loads.push(load)
-    groups[key].totalPayout += parseFloat(load.payout || 0)
-    groups[key].totalMiles += parseFloat(load.total_miles || 0)
-  })
-  return Object.values(groups)
-    .filter(g => g.loads.length > 0)
-    .sort((a, b) => b.loads.length - a.loads.length)
-})
+// Grouped data from backend
+const groupedRoutes = ref([])
 
 const getRatePerMile = (load) => {
   const payout = parseFloat(load.payout || 0)
@@ -258,18 +244,27 @@ const getFacilityShort = (value) => {
 const fetchLoads = async () => {
   loading.value = true
   try {
-    const params = new URLSearchParams({
+    const params = {
       page: page.value,
       per_page: perPage.value,
       sort_by: sortBy.value,
-    })
-    if (search.value) params.append('search', search.value)
-    if (filterStatus.value) params.append('status', filterStatus.value)
+    }
+    if (search.value) params.search = search.value
+    if (filterStatus.value) params.status = filterStatus.value
+    if (groupByLoadId.value) params.group = 'true'
 
-    const response = await api.get(`/api/loads?${params}`)
+    const response = await api.get('/api/loads', { params })
     if (response.data.success) {
-      loads.value = response.data.data?.loads || []
-      totalLoads.value = response.data.data?.pagination?.total || 0
+      if (groupByLoadId.value) {
+        // Grouped response: routes array with nested loads
+        groupedRoutes.value = response.data.data?.routes || []
+        loads.value = []
+        totalLoads.value = response.data.data?.pagination?.total || 0
+      } else {
+        loads.value = response.data.data?.loads || []
+        groupedRoutes.value = []
+        totalLoads.value = response.data.data?.pagination?.total || 0
+      }
     }
   } catch (error) {
     console.error('Failed to fetch loads:', error)
@@ -785,6 +780,7 @@ watch(search, () => {
 
 watch([filterStatus, sortBy], () => { page.value = 1; fetchLoads() })
 watch(page, () => { fetchLoads() })
+watch(groupByLoadId, () => { page.value = 1; fetchLoads() })
 
 onMounted(() => {
   fetchLoads()
@@ -795,7 +791,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="loads-page" :class="{ 'theme-light': !isDark }">
+  <div class="loads-page" :class="{ 'dark-mode': isDark }">
     <!-- Animated Background -->
     <div class="page-bg">
       <div class="bg-gradient"></div>
@@ -1014,7 +1010,7 @@ onMounted(() => {
         <p>Loading loads...</p>
       </div>
 
-      <div v-else-if="!loads.length" class="empty-state">
+      <div v-else-if="!loads.length && !groupedRoutes.length" class="empty-state">
         <div class="empty-icon"><VIcon icon="bx-package" size="64" /></div>
         <h3>No Loads Found</h3>
         <p>Try adjusting your filters or create a new load to get started.</p>
@@ -1025,56 +1021,43 @@ onMounted(() => {
       </div>
 
       <!-- Grouped View -->
-      <div v-else-if="groupByLoadId && groupedLoads" class="grouped-view">
+      <div v-else-if="groupByLoadId && groupedRoutes.length" class="grouped-view">
         <div
-          v-for="(group, gIdx) in groupedLoads"
-          :key="group.load_id"
+          v-for="(group, gIdx) in groupedRoutes"
+          :key="group.route_id"
           class="load-group"
           :style="{ '--delay': `${gIdx * 0.05}s` }"
         >
-          <div class="group-header" @click="toggleGroupExpand(group.load_id)">
+          <div class="group-header" @click="toggleGroupExpand(group.route_id)">
             <div class="group-header-left">
               <div class="group-icon">
                 <VIcon icon="bx-layer" size="20" />
-                <span class="group-count-badge">{{ group.loads.length }}</span>
+                <span class="group-count-badge">{{ group.load_count }}</span>
               </div>
               <div class="group-info">
-                <span class="group-id">{{ group.load_id }}</span>
-                <span class="group-subtitle">{{ group.loads.length }} load{{ group.loads.length > 1 ? 's' : '' }} with this ID</span>
+                <span class="group-id">{{ group.route_id }}</span>
+                <span class="group-subtitle">{{ group.load_count }} load{{ group.load_count > 1 ? 's' : '' }} on this route</span>
               </div>
             </div>
             <div class="group-header-right">
               <div class="group-stat">
                 <span class="group-stat-label">Total Payout</span>
-                <span class="group-stat-value money">{{ formatMoney(group.totalPayout) }}</span>
+                <span class="group-stat-value money">{{ formatMoney(group.total_payout) }}</span>
               </div>
               <div class="group-stat">
                 <span class="group-stat-label">Total Miles</span>
-                <span class="group-stat-value">{{ group.totalMiles.toLocaleString() }} mi</span>
+                <span class="group-stat-value">{{ parseFloat(group.total_miles || 0).toLocaleString() }} mi</span>
               </div>
               <div class="group-stat">
-                <span class="group-stat-label">Avg Payout</span>
-                <span class="group-stat-value">{{ formatMoney(group.totalPayout / group.loads.length) }}</span>
+                <span class="group-stat-label">Most Expensive</span>
+                <span class="group-stat-value">{{ formatMoney(group.most_expensive) }}</span>
               </div>
-              <VIcon :icon="expandedGroups[group.load_id] ? 'bx-chevron-up' : 'bx-chevron-down'" size="22" class="group-chevron" />
+              <VIcon :icon="expandedGroups[group.route_id] ? 'bx-chevron-up' : 'bx-chevron-down'" size="22" class="group-chevron" />
             </div>
           </div>
 
-          <!-- Group status summary -->
-          <div class="group-status-bar">
-            <span
-              v-for="status in ['available', 'booked', 'in_transit', 'delivered', 'cancelled']"
-              :key="status"
-              v-show="group.loads.filter(l => l.status === status).length > 0"
-              class="group-status-chip"
-              :style="{ background: getStatusColor(status).bg, color: getStatusColor(status).text, borderColor: getStatusColor(status).border }"
-            >
-              {{ formatStatus(status) }}: {{ group.loads.filter(l => l.status === status).length }}
-            </span>
-          </div>
-
           <!-- Expanded group loads -->
-          <div v-if="expandedGroups[group.load_id]" class="group-loads">
+          <div v-if="expandedGroups[group.route_id]" class="group-loads">
             <div
               v-for="(load, index) in group.loads"
               :key="load.id"
@@ -1442,28 +1425,13 @@ onMounted(() => {
       </div>
 
       <!-- Pagination -->
-      <div v-if="loads.length && totalPages > 1" class="pagination-container">
+      <div v-if="(loads.length || groupedRoutes.length) && totalPages > 1" class="pagination-container">
         <div class="pagination-info">
           Showing <strong>{{ (page - 1) * perPage + 1 }}</strong> to
           <strong>{{ Math.min(page * perPage, totalLoads) }}</strong> of
-          <strong>{{ totalLoads }}</strong> loads
+          <strong>{{ totalLoads }}</strong> {{ groupByLoadId ? 'routes' : 'loads' }}
         </div>
-        <div class="pagination-controls">
-          <VBtn icon variant="tonal" :disabled="page === 1" @click="page--" class="page-btn">
-            <VIcon icon="bx-chevron-left" />
-          </VBtn>
-          <div class="page-numbers">
-            <template v-for="p in Math.min(totalPages, 5)" :key="p">
-              <VBtn :variant="page === p ? 'flat' : 'text'" :class="{ 'active-page': page === p }" class="page-num" @click="page = p">
-                {{ p }}
-              </VBtn>
-            </template>
-            <span v-if="totalPages > 5" class="page-ellipsis">...</span>
-          </div>
-          <VBtn icon variant="tonal" :disabled="page >= totalPages" @click="page++" class="page-btn">
-            <VIcon icon="bx-chevron-right" />
-          </VBtn>
-        </div>
+        <VPagination v-model="page" :length="totalPages" :total-visible="7" density="compact" />
       </div>
     </div>
 
@@ -1815,6 +1783,31 @@ onMounted(() => {
 .loads-page {
   --primary: #6366f1;
   --primary-light: #818cf8;
+  --card-bg: rgba(255, 255, 255, 0.85);
+  --card-bg-subtle: rgba(0, 0, 0, 0.02);
+  --card-border: rgba(0, 0, 0, 0.06);
+  --card-border-hover: rgba(0, 0, 0, 0.14);
+  --surface-bg: rgba(255, 255, 255, 0.8);
+  --dialog-bg: #ffffff;
+  --dialog-border: rgba(0, 0, 0, 0.1);
+  --dialog-footer-bg: rgba(0, 0, 0, 0.03);
+  --input-bg: rgba(0, 0, 0, 0.03);
+  --hover-bg: rgba(0, 0, 0, 0.04);
+  --hover-bg-strong: rgba(0, 0, 0, 0.08);
+  --text-heading: #1e293b;
+  --text-body: #334155;
+  --text-secondary: #64748b;
+  --text-muted: #94a3b8;
+  --border-line: rgba(0, 0, 0, 0.06);
+  --grad-base-start: #f8f9fe;
+  --grad-base-end: #f1f3f9;
+  --grid-line: rgba(0, 0, 0, 0.03);
+  --shape-opacity: 0.12;
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.06);
+  --shadow-btn: 0 8px 32px rgba(99, 102, 241, 0.2);
+}
+
+.loads-page.dark-mode {
   --card-bg: rgba(30, 30, 46, 0.85);
   --card-bg-subtle: rgba(255, 255, 255, 0.04);
   --card-border: rgba(255, 255, 255, 0.08);
@@ -1837,31 +1830,6 @@ onMounted(() => {
   --shape-opacity: 0.4;
   --shadow-card: 0 8px 24px rgba(0, 0, 0, 0.2);
   --shadow-btn: 0 8px 32px rgba(99, 102, 241, 0.35);
-}
-
-.loads-page.theme-light {
-  --card-bg: rgba(255, 255, 255, 0.92);
-  --card-bg-subtle: rgba(0, 0, 0, 0.02);
-  --card-border: rgba(0, 0, 0, 0.08);
-  --card-border-hover: rgba(0, 0, 0, 0.14);
-  --surface-bg: rgba(255, 255, 255, 0.8);
-  --dialog-bg: #ffffff;
-  --dialog-border: rgba(0, 0, 0, 0.1);
-  --dialog-footer-bg: rgba(0, 0, 0, 0.03);
-  --input-bg: rgba(0, 0, 0, 0.03);
-  --hover-bg: rgba(0, 0, 0, 0.04);
-  --hover-bg-strong: rgba(0, 0, 0, 0.08);
-  --text-heading: #1e293b;
-  --text-body: #334155;
-  --text-secondary: #64748b;
-  --text-muted: #94a3b8;
-  --border-line: rgba(0, 0, 0, 0.06);
-  --grad-base-start: #f8f9fe;
-  --grad-base-end: #f1f3f9;
-  --grid-line: rgba(0, 0, 0, 0.03);
-  --shape-opacity: 0.12;
-  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.06);
-  --shadow-btn: 0 8px 32px rgba(99, 102, 241, 0.2);
 }
 
 .loads-page { position: relative; min-height: 100vh; padding: 24px; overflow-x: hidden; }

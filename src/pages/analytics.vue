@@ -150,8 +150,8 @@ const overviewStats = computed(() => {
 })
 
 // ─── Trends computed ───
-const trendPoints = computed(() => trendsData.value?.data_points || trendsData.value?.points || [])
-const trendSummary = computed(() => trendsData.value?.summary || trendsData.value || {})
+const trendPoints = computed(() => trendsData.value?.data || trendsData.value?.data_points || [])
+const trendSummary = computed(() => trendsData.value?.summary || {})
 const maxTrendValue = computed(() => {
   const points = trendPoints.value
   if (!points.length) return 1
@@ -160,11 +160,13 @@ const maxTrendValue = computed(() => {
 
 // ─── Compare computed ───
 const comparePeriods = computed(() => {
-  if (!compareData.value) return { period1: {}, period2: {}, changes: {} }
+  if (!compareData.value) return { period1: {}, period2: {}, changes: {}, label1: '', label2: '' }
   return {
-    period1: compareData.value.period_1 || compareData.value.current || {},
-    period2: compareData.value.period_2 || compareData.value.previous || {},
-    changes: compareData.value.changes || compareData.value.comparison || {},
+    period1: compareData.value.period_a?.stats || {},
+    period2: compareData.value.period_b?.stats || {},
+    changes: compareData.value.changes || {},
+    label1: compareData.value.period_a?.label || comparePeriod1.value,
+    label2: compareData.value.period_b?.label || comparePeriod2.value,
   }
 })
 
@@ -186,7 +188,7 @@ const fetchAll = async () => {
     api.get('/admin-api/analytics/loads/frequency', { params: { period: '30d', min_count: 1 } }),
     api.get('/api/loads/stats'),
     api.get('/admin-api/analytics/loads/trends', { params: { period: '30d' } }),
-    api.get('/admin-api/analytics/loads/compare', { params: { period_1: '7d', period_2: '30d' } }),
+    api.get('/admin-api/analytics/loads/compare', { params: { period_a: '7d', period_b: '30d' } }),
     api.get('/admin-api/analytics/loads/routes'),
   ])
 
@@ -211,7 +213,7 @@ const fetchAll = async () => {
 const fetchTrends = async () => {
   trendsLoading.value = true
   try {
-    const response = await api.get('/admin-api/analytics/loads/trends', { params: { period: trendsPeriod.value } })
+    const response = await api.get('/admin-api/analytics/loads/trends', { params: { period: trendsPeriod.value, group_by: 'day' } })
     if (response.data.success) trendsData.value = response.data.data
   } catch (e) { console.error('Trends fetch failed:', e) }
   trendsLoading.value = false
@@ -221,7 +223,7 @@ const fetchCompare = async () => {
   compareLoading.value = true
   try {
     const response = await api.get('/admin-api/analytics/loads/compare', {
-      params: { period_1: comparePeriod1.value, period_2: comparePeriod2.value },
+      params: { period_a: comparePeriod1.value, period_b: comparePeriod2.value },
     })
     if (response.data.success) compareData.value = response.data.data
   } catch (e) { console.error('Compare fetch failed:', e) }
@@ -717,7 +719,7 @@ onMounted(fetchAll)
             <div class="compare-period">
               <h4 class="compare-period-title">
                 <VIcon icon="bx-calendar" size="18" class="me-2" />
-                Period 1 <span class="text-caption">({{ comparePeriod1 }})</span>
+                {{ comparePeriods.label1 || 'Period 1' }}
               </h4>
               <div class="compare-metrics">
                 <div v-for="(val, key) in comparePeriods.period1" :key="key" class="compare-metric" v-show="typeof val !== 'object'">
@@ -736,10 +738,11 @@ onMounted(fetchAll)
                 Changes
               </h4>
               <div class="compare-metrics">
-                <div v-for="(val, key) in comparePeriods.changes" :key="key" class="compare-metric" v-show="typeof val !== 'object'">
+                <div v-for="(val, key) in comparePeriods.changes" :key="key" class="compare-metric" v-show="val && typeof val === 'object'">
                   <span class="detail-label">{{ formatKey(key) }}</span>
-                  <span class="detail-value" :class="getCompareChangeClass(val)">
-                    {{ formatCompareChange(val) }}
+                  <span class="detail-value" :class="getCompareChangeClass(val?.change)">
+                    {{ formatCompareChange(val?.change) }}
+                    <span v-if="val?.change_pct" class="text-caption ms-1">({{ val.change_pct }}%)</span>
                   </span>
                 </div>
               </div>
@@ -749,7 +752,7 @@ onMounted(fetchAll)
             <div class="compare-period">
               <h4 class="compare-period-title">
                 <VIcon icon="bx-calendar-alt" size="18" class="me-2" />
-                Period 2 <span class="text-caption">({{ comparePeriod2 }})</span>
+                {{ comparePeriods.label2 || 'Period 2' }}
               </h4>
               <div class="compare-metrics">
                 <div v-for="(val, key) in comparePeriods.period2" :key="key" class="compare-metric" v-show="typeof val !== 'object'">

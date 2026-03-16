@@ -60,10 +60,22 @@ const operationsItems = computed(() => [
     permission: 'loads.view',
   },
   {
+    title: 'Routes',
+    icon: 'bx-map-alt',
+    to: '/routes',
+    permission: 'loads.view',
+  },
+  {
     title: 'Facilities',
     icon: 'bx-buildings',
     to: '/facilities',
     permission: 'facilities.view',
+  },
+  {
+    title: 'States',
+    icon: 'bx-map',
+    to: '/states',
+    permission: 'analytics.view',
   },
   {
     title: 'Analytics',
