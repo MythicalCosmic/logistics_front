@@ -12,6 +12,13 @@ const authStore = useAuthStore()
 const { success: toastSuccess, error: toastError } = useToast()
 const vuetifyTheme = useTheme()
 const isDark = computed(() => vuetifyTheme.global.current.value.dark)
+const dialogStyle = computed(() => ({
+  background: isDark.value ? '#1e1e2e' : '#ffffff',
+  color: isDark.value ? '#f8fafc' : '#1e293b',
+}))
+const dialogFooterStyle = computed(() => ({
+  background: isDark.value ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.03)',
+}))
 
 // Permissions
 const canCreate = computed(() => authStore.hasPermission('loads.create'))
@@ -1417,7 +1424,7 @@ onMounted(() => {
 
     <!-- Create Dialog -->
     <VDialog v-model="showCreateDialog" max-width="700" persistent class="custom-dialog">
-      <VCard class="dialog-card">
+      <VCard class="dialog-card" :style="dialogStyle">
         <div class="dialog-header">
           <div class="dialog-icon create"><VIcon icon="bx-package" size="28" /></div>
           <div>
@@ -1594,7 +1601,7 @@ onMounted(() => {
 
     <!-- Edit Dialog -->
     <VDialog v-model="showEditDialog" max-width="700" persistent class="custom-dialog">
-      <VCard class="dialog-card">
+      <VCard class="dialog-card" :style="dialogStyle">
         <div class="dialog-header">
           <div class="dialog-icon edit"><VIcon icon="bx-edit" size="28" /></div>
           <div>
@@ -1698,7 +1705,7 @@ onMounted(() => {
 
     <!-- Cancel Dialog -->
     <VDialog v-model="showCancelDialog" max-width="450" class="custom-dialog">
-      <VCard class="dialog-card delete-dialog">
+      <VCard class="dialog-card delete-dialog" :style="dialogStyle">
         <div class="delete-content">
           <div class="delete-icon"><VIcon icon="bx-error-circle" size="64" /></div>
           <h2 class="delete-title">Cancel Load</h2>
@@ -2014,8 +2021,10 @@ onMounted(() => {
 
 /* Dialogs */
 .custom-dialog :deep(.v-overlay__content) { margin: 16px; }
-.custom-dialog :deep(.v-overlay__scrim) { background: rgba(0, 0, 0, 0.85) !important; }
-.dialog-card { background: var(--dialog-bg) !important; border: 1px solid var(--dialog-border); border-radius: 24px !important; overflow: hidden; backdrop-filter: none !important; }
+.custom-dialog :deep(.v-overlay__scrim) { background: rgba(0, 0, 0, 0.7) !important; }
+.dialog-card { border: 1px solid var(--dialog-border); border-radius: 24px !important; overflow: hidden; }
+.dialog-card.v-card { background: var(--dialog-bg) !important; }
+.dialog-card :deep(.v-card__overlay) { display: none; }
 .dialog-header { display: flex; align-items: flex-start; gap: 16px; padding: 24px 24px 0; position: relative; }
 .dialog-icon { display: flex; align-items: center; justify-content: center; width: 52px; height: 52px; border-radius: 14px; flex-shrink: 0; }
 .dialog-icon.create { background: linear-gradient(135deg, rgba(16,185,129,0.2), rgba(6,182,212,0.2)); color: #34d399; }

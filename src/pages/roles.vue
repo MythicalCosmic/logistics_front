@@ -1716,14 +1716,19 @@ onMounted(async () => {
   margin: 16px;
 }
 .custom-dialog :deep(.v-overlay__scrim) {
-  background: rgba(0, 0, 0, 0.85) !important;
+  background: rgba(0, 0, 0, 0.7) !important;
 }
 
 .dialog-card {
-  background: var(--dialog-bg) !important;
   border: 1px solid var(--dialog-border);
   border-radius: 24px !important;
   overflow: hidden;
+}
+.dialog-card.v-card {
+  background: var(--dialog-bg) !important;
+}
+.dialog-card :deep(.v-card__overlay) {
+  display: none;
 }
 
 .dialog-header {
