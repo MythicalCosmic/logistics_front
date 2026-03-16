@@ -3,14 +3,21 @@
 <script setup>
 import { ref, onMounted, watch, computed } from 'vue'
 import { useTheme } from 'vuetify'
+import { useAuthStore } from '@/stores/auth'
 import { useToast } from '@/composables/useToast'
 import api from '@/services/api'
 
+const authStore = useAuthStore()
 const { success: toastSuccess, error: toastError } = useToast()
 const vuetifyTheme = useTheme()
 const isDark = computed(() => vuetifyTheme.global.current.value.dark)
 
-// Facility types
+// Permissions
+const canCreate = computed(() => authStore.hasPermission('facilities.create'))
+const canEdit = computed(() => authStore.hasPermission('facilities.update'))
+const canDelete = computed(() => authStore.hasPermission('facilities.delete'))
+
+// Facility types config
 const facilityTypes = [
   { title: 'Warehouse', value: 'warehouse' },
   { title: 'Terminal', value: 'terminal' },
@@ -20,6 +27,18 @@ const facilityTypes = [
   { title: 'Cold Storage', value: 'cold_storage' },
   { title: 'Port', value: 'port' },
 ]
+
+const facilityTypeConfig = {
+  warehouse: { color: '#3b82f6', icon: 'bx-store', bg: 'rgba(59, 130, 246, 0.12)', border: 'rgba(59, 130, 246, 0.25)' },
+  terminal: { color: '#8b5cf6', icon: 'bx-terminal', bg: 'rgba(139, 92, 246, 0.12)', border: 'rgba(139, 92, 246, 0.25)' },
+  yard: { color: '#f59e0b', icon: 'bx-landscape', bg: 'rgba(245, 158, 11, 0.12)', border: 'rgba(245, 158, 11, 0.25)' },
+  distribution_center: { color: '#10b981', icon: 'bx-transfer', bg: 'rgba(16, 185, 129, 0.12)', border: 'rgba(16, 185, 129, 0.25)' },
+  cross_dock: { color: '#f43f5e', icon: 'bx-shuffle', bg: 'rgba(244, 63, 94, 0.12)', border: 'rgba(244, 63, 94, 0.25)' },
+  cold_storage: { color: '#06b6d4', icon: 'bx-fridge', bg: 'rgba(6, 182, 212, 0.12)', border: 'rgba(6, 182, 212, 0.25)' },
+  port: { color: '#6366f1', icon: 'bx-ship', bg: 'rgba(99, 102, 241, 0.12)', border: 'rgba(99, 102, 241, 0.25)' },
+}
+
+const defaultTypeConfig = { color: '#64748b', icon: 'bx-map-pin', bg: 'rgba(100, 116, 139, 0.12)', border: 'rgba(100, 116, 139, 0.25)' }
 
 // Data
 const facilities = ref([])
@@ -39,6 +58,7 @@ const showCreateDialog = ref(false)
 const showEditDialog = ref(false)
 const showDeleteDialog = ref(false)
 const dialogLoading = ref(false)
+const deleteError = ref('')
 
 // Form Data
 const defaultForm = {
@@ -56,28 +76,39 @@ const selectedFacility = ref(null)
 
 // Stats
 const serverStats = ref(null)
-const stats = computed(() => {
-  if (serverStats.value) {
-    return {
-      total: serverStats.value.total_facilities ?? serverStats.value.total ?? totalFacilities.value,
-      byType: serverStats.value.by_type || serverStats.value.facility_types || [],
-      byState: serverStats.value.by_state || serverStats.value.states || [],
-      recentCount: serverStats.value.recent_count ?? 0,
-    }
-  }
-  // Derive from current list if no stats endpoint
-  const typeMap = {}
-  const stateMap = {}
-  facilities.value.forEach(f => {
-    typeMap[f.facility_type] = (typeMap[f.facility_type] || 0) + 1
-    if (f.state) stateMap[f.state] = (stateMap[f.state] || 0) + 1
-  })
-  return {
-    total: totalFacilities.value,
-    byType: Object.entries(typeMap).map(([type, count]) => ({ type, count })),
-    byState: Object.entries(stateMap).map(([state, count]) => ({ state, count })),
-    recentCount: 0,
-  }
+
+const statsCards = computed(() => {
+  const s = serverStats.value
+  const warehouseCount = s?.type_breakdown?.warehouse ?? 0
+  const topState = s?.top_states?.[0] ?? null
+  const typeCount = s?.type_breakdown ? Object.keys(s.type_breakdown).length : 0
+
+  return [
+    {
+      label: 'Total Facilities',
+      value: s?.total_facilities ?? totalFacilities.value,
+      icon: 'bx-buildings',
+      colorClass: 'stat-total',
+    },
+    {
+      label: 'Warehouses',
+      value: warehouseCount,
+      icon: 'bx-store',
+      colorClass: 'stat-warehouses',
+    },
+    {
+      label: topState ? `${topState.state}` : 'Top State',
+      value: topState ? topState.count : 0,
+      icon: 'bx-map',
+      colorClass: 'stat-topstate',
+    },
+    {
+      label: 'Facility Types',
+      value: typeCount,
+      icon: 'bx-category',
+      colorClass: 'stat-types',
+    },
+  ]
 })
 
 // Unique states from facilities for filter
@@ -89,23 +120,7 @@ const availableStates = computed(() => {
   return [...states].sort().map(s => ({ title: s, value: s }))
 })
 
-// Stat cards derived
-const typeBreakdown = computed(() => {
-  const types = {}
-  facilities.value.forEach(f => {
-    types[f.facility_type] = (types[f.facility_type] || 0) + 1
-  })
-  return types
-})
-
-const stateCount = computed(() => {
-  const states = new Set()
-  facilities.value.forEach(f => {
-    if (f.state) states.add(f.state)
-  })
-  return states.size
-})
-
+// Fetch stats
 const fetchStats = async () => {
   try {
     const response = await api.get('/admin-api/facilities/stats')
@@ -149,7 +164,11 @@ const fetchFacilities = async () => {
 const handleCreate = async () => {
   formErrors.value = {}
 
-  if (!form.value.code) formErrors.value.code = 'Code is required'
+  if (!form.value.code?.trim()) {
+    formErrors.value.code = 'Code is required'
+  } else if (form.value.code.length > 50) {
+    formErrors.value.code = 'Code must be 50 characters or less'
+  }
 
   if (Object.keys(formErrors.value).length > 0) return
 
@@ -157,7 +176,7 @@ const handleCreate = async () => {
 
   try {
     const response = await api.post('/admin-api/facilities/create', {
-      code: form.value.code,
+      code: form.value.code.trim(),
       name: form.value.name || '',
       address: form.value.address || '',
       city: form.value.city || '',
@@ -174,7 +193,9 @@ const handleCreate = async () => {
       fetchStats()
     }
   } catch (error) {
-    // Handled by interceptor
+    if (error.response?.data?.message) {
+      toastError(error.response.data.message)
+    }
   } finally {
     dialogLoading.value = false
   }
@@ -184,7 +205,11 @@ const handleCreate = async () => {
 const handleUpdate = async () => {
   formErrors.value = {}
 
-  if (!form.value.code) formErrors.value.code = 'Code is required'
+  if (!form.value.code?.trim()) {
+    formErrors.value.code = 'Code is required'
+  } else if (form.value.code.length > 50) {
+    formErrors.value.code = 'Code must be 50 characters or less'
+  }
 
   if (Object.keys(formErrors.value).length > 0) return
 
@@ -192,7 +217,7 @@ const handleUpdate = async () => {
 
   try {
     const response = await api.put(`/admin-api/facilities/${selectedFacility.value.id}/update`, {
-      code: form.value.code,
+      code: form.value.code.trim(),
       name: form.value.name || '',
       address: form.value.address || '',
       city: form.value.city || '',
@@ -209,7 +234,9 @@ const handleUpdate = async () => {
       fetchStats()
     }
   } catch (error) {
-    // Handled by interceptor
+    if (error.response?.data?.message) {
+      toastError(error.response.data.message)
+    }
   } finally {
     dialogLoading.value = false
   }
@@ -220,6 +247,7 @@ const handleDelete = async () => {
   if (!selectedFacility.value) return
 
   dialogLoading.value = true
+  deleteError.value = ''
 
   try {
     const response = await api.delete(`/admin-api/facilities/${selectedFacility.value.id}/delete`)
@@ -228,11 +256,14 @@ const handleDelete = async () => {
       toastSuccess('Facility deleted successfully')
       showDeleteDialog.value = false
       selectedFacility.value = null
+      deleteError.value = ''
       fetchFacilities()
       fetchStats()
     }
   } catch (error) {
-    // Handled by interceptor
+    const msg = error.response?.data?.message || 'Failed to delete facility'
+    deleteError.value = msg
+    toastError(msg)
   } finally {
     dialogLoading.value = false
   }
@@ -250,12 +281,14 @@ const openEditDialog = (facility) => {
     zip_code: facility.zip_code || '',
     facility_type: facility.facility_type || 'warehouse',
   }
+  formErrors.value = {}
   showEditDialog.value = true
 }
 
 // Open delete dialog
 const openDeleteDialog = (facility) => {
   selectedFacility.value = facility
+  deleteError.value = ''
   showDeleteDialog.value = true
 }
 
@@ -266,6 +299,17 @@ const resetForm = () => {
   selectedFacility.value = null
 }
 
+// Format type label
+const formatType = (type) => {
+  if (!type) return 'Unknown'
+  return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+}
+
+// Get type config
+const getTypeConfig = (type) => {
+  return facilityTypeConfig[type] || defaultTypeConfig
+}
+
 // Format date
 const formatDate = (dateString) => {
   if (!dateString) return '-'
@@ -274,44 +318,6 @@ const formatDate = (dateString) => {
     month: 'short',
     day: 'numeric',
   })
-}
-
-// Format type label
-const formatType = (type) => {
-  if (!type) return 'Unknown'
-  return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-}
-
-// Get type color
-const getTypeColor = (type) => {
-  const t = type?.toLowerCase() || ''
-  if (t.includes('warehouse')) return { bg: 'rgba(99, 102, 241, 0.15)', text: '#818cf8', border: 'rgba(99, 102, 241, 0.3)', gradient: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }
-  if (t.includes('terminal')) return { bg: 'rgba(16, 185, 129, 0.15)', text: '#34d399', border: 'rgba(16, 185, 129, 0.3)', gradient: 'linear-gradient(135deg, #10b981, #06b6d4)' }
-  if (t.includes('yard')) return { bg: 'rgba(245, 158, 11, 0.15)', text: '#fbbf24', border: 'rgba(245, 158, 11, 0.3)', gradient: 'linear-gradient(135deg, #f59e0b, #f97316)' }
-  if (t.includes('distribution')) return { bg: 'rgba(236, 72, 153, 0.15)', text: '#f472b6', border: 'rgba(236, 72, 153, 0.3)', gradient: 'linear-gradient(135deg, #ec4899, #a855f7)' }
-  if (t.includes('cross')) return { bg: 'rgba(6, 182, 212, 0.15)', text: '#22d3ee', border: 'rgba(6, 182, 212, 0.3)', gradient: 'linear-gradient(135deg, #06b6d4, #3b82f6)' }
-  if (t.includes('cold')) return { bg: 'rgba(59, 130, 246, 0.15)', text: '#60a5fa', border: 'rgba(59, 130, 246, 0.3)', gradient: 'linear-gradient(135deg, #3b82f6, #6366f1)' }
-  if (t.includes('port')) return { bg: 'rgba(156, 39, 176, 0.15)', text: '#ce93d8', border: 'rgba(156, 39, 176, 0.3)', gradient: 'linear-gradient(135deg, #9c27b0, #7b1fa2)' }
-  return { bg: 'rgba(100, 116, 139, 0.15)', text: '#94a3b8', border: 'rgba(100, 116, 139, 0.3)', gradient: 'linear-gradient(135deg, #64748b, #475569)' }
-}
-
-// Get type icon
-const getTypeIcon = (type) => {
-  const t = type?.toLowerCase() || ''
-  if (t.includes('warehouse')) return 'bx-buildings'
-  if (t.includes('terminal')) return 'bx-bus'
-  if (t.includes('yard')) return 'bx-grid-alt'
-  if (t.includes('distribution')) return 'bx-transfer'
-  if (t.includes('cross')) return 'bx-intersect'
-  if (t.includes('cold')) return 'bx-water'
-  if (t.includes('port')) return 'bx-boat'
-  return 'bx-map-pin'
-}
-
-// Build full address string
-const getFullAddress = (facility) => {
-  const parts = [facility.address, facility.city, facility.state, facility.zip_code].filter(Boolean)
-  return parts.join(', ') || 'No address provided'
 }
 
 // Watch for filter changes
@@ -340,7 +346,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="facilities-page" :class="{ 'theme-light': !isDark }">
+  <div class="facilities-page" :class="{ 'dark-mode': isDark }">
     <!-- Animated Background -->
     <div class="page-bg">
       <div class="bg-gradient"></div>
@@ -361,10 +367,11 @@ onMounted(() => {
           </div>
           <div>
             <h1 class="page-title">Facilities</h1>
-            <p class="page-subtitle">Manage warehouses, terminals, and facility locations</p>
+            <p class="page-subtitle">Manage warehouses, terminals, and distribution centers</p>
           </div>
         </div>
         <VBtn
+          v-if="canCreate"
           class="add-btn"
           size="large"
           @click="showCreateDialog = true"
@@ -377,46 +384,19 @@ onMounted(() => {
 
     <!-- Stats Cards -->
     <div class="stats-grid">
-      <div class="stat-card stat-total">
+      <div
+        v-for="(stat, index) in statsCards"
+        :key="stat.label"
+        class="stat-card"
+        :class="stat.colorClass"
+        :style="{ animationDelay: `${index * 0.1}s` }"
+      >
         <div class="stat-icon">
-          <VIcon icon="bx-buildings" size="28" />
+          <VIcon :icon="stat.icon" size="28" />
         </div>
         <div class="stat-content">
-          <span class="stat-value">{{ totalFacilities }}</span>
-          <span class="stat-label">Total Facilities</span>
-        </div>
-        <div class="stat-decoration"></div>
-      </div>
-
-      <div class="stat-card stat-warehouses">
-        <div class="stat-icon">
-          <VIcon icon="bx-box" size="28" />
-        </div>
-        <div class="stat-content">
-          <span class="stat-value">{{ typeBreakdown['warehouse'] || 0 }}</span>
-          <span class="stat-label">Warehouses</span>
-        </div>
-        <div class="stat-decoration"></div>
-      </div>
-
-      <div class="stat-card stat-terminals">
-        <div class="stat-icon">
-          <VIcon icon="bx-bus" size="28" />
-        </div>
-        <div class="stat-content">
-          <span class="stat-value">{{ typeBreakdown['terminal'] || 0 }}</span>
-          <span class="stat-label">Terminals</span>
-        </div>
-        <div class="stat-decoration"></div>
-      </div>
-
-      <div class="stat-card stat-states">
-        <div class="stat-icon">
-          <VIcon icon="bx-map" size="28" />
-        </div>
-        <div class="stat-content">
-          <span class="stat-value">{{ stateCount }}</span>
-          <span class="stat-label">States</span>
+          <span class="stat-value">{{ stat.value }}</span>
+          <span class="stat-label">{{ stat.label }}</span>
         </div>
         <div class="stat-decoration"></div>
       </div>
@@ -494,8 +474,8 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- Facilities List -->
-    <div class="facilities-container">
+    <!-- Facilities Table -->
+    <VCard class="table-card">
       <!-- Loading State -->
       <div v-if="loading" class="loading-state">
         <div class="loading-spinner">
@@ -512,6 +492,7 @@ onMounted(() => {
         <h3>No Facilities Found</h3>
         <p>Try adjusting your filters or add a new facility to get started.</p>
         <VBtn
+          v-if="canCreate"
           class="add-btn mt-4"
           @click="showCreateDialog = true"
         >
@@ -520,106 +501,84 @@ onMounted(() => {
         </VBtn>
       </div>
 
-      <!-- Facilities Grid -->
-      <div v-else class="facilities-grid">
-        <div
-          v-for="(facility, index) in facilities"
-          :key="facility.id"
-          class="facility-card"
-          :style="{ '--delay': `${index * 0.05}s` }"
-        >
-          <div class="card-glow"></div>
-
-          <!-- Facility Header -->
-          <div class="facility-header">
-            <div class="facility-avatar" :style="{ background: getTypeColor(facility.facility_type).gradient }">
-              <VIcon :icon="getTypeIcon(facility.facility_type)" size="24" color="white" />
-            </div>
-
-            <div class="facility-info">
-              <h3 class="facility-code">{{ facility.code }}</h3>
-              <p class="facility-name">{{ facility.name || 'Unnamed facility' }}</p>
-            </div>
-
-            <!-- Actions Menu -->
-            <VMenu location="bottom end" :close-on-content-click="true">
-              <template #activator="{ props }">
-                <VBtn
-                  v-bind="props"
-                  icon
-                  variant="text"
-                  class="menu-btn"
+      <!-- Data Table -->
+      <div v-else class="table-wrapper">
+        <table class="facilities-table">
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Name</th>
+              <th>Type</th>
+              <th>City</th>
+              <th>State</th>
+              <th>Address</th>
+              <th v-if="canEdit || canDelete">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="(facility, index) in facilities"
+              :key="facility.id"
+              class="table-row"
+              :style="{ animationDelay: `${index * 0.03}s` }"
+            >
+              <td>
+                <span class="code-cell">{{ facility.code }}</span>
+              </td>
+              <td>
+                <span class="name-cell">{{ facility.name || '-' }}</span>
+              </td>
+              <td>
+                <span
+                  class="type-chip"
+                  :style="{
+                    background: getTypeConfig(facility.facility_type).bg,
+                    color: getTypeConfig(facility.facility_type).color,
+                    borderColor: getTypeConfig(facility.facility_type).border,
+                  }"
                 >
-                  <VIcon icon="bx-dots-vertical-rounded" />
-                </VBtn>
-              </template>
-              <VList class="action-menu">
-                <VListItem @click="openEditDialog(facility)">
-                  <template #prepend>
-                    <VIcon icon="bx-edit" color="primary" />
-                  </template>
-                  <VListItemTitle>Edit Facility</VListItemTitle>
-                </VListItem>
-                <VListItem
-                  @click="openDeleteDialog(facility)"
-                  class="delete-item"
-                >
-                  <template #prepend>
-                    <VIcon icon="bx-trash" color="error" />
-                  </template>
-                  <VListItemTitle class="text-error">Delete Facility</VListItemTitle>
-                </VListItem>
-              </VList>
-            </VMenu>
-          </div>
-
-          <!-- Address -->
-          <div class="facility-address">
-            <VIcon icon="bx-map" size="16" />
-            <span>{{ getFullAddress(facility) }}</span>
-          </div>
-
-          <!-- Footer -->
-          <div class="facility-footer">
-            <span
-              class="type-badge"
-              :style="{
-                background: getTypeColor(facility.facility_type).bg,
-                color: getTypeColor(facility.facility_type).text,
-                borderColor: getTypeColor(facility.facility_type).border,
-              }"
-            >
-              <VIcon :icon="getTypeIcon(facility.facility_type)" size="14" class="me-1" />
-              {{ formatType(facility.facility_type) }}
-            </span>
-            <div class="footer-date">
-              <VIcon icon="bx-calendar" size="16" />
-              <span>{{ formatDate(facility.created_at) }}</span>
-            </div>
-          </div>
-
-          <!-- Quick Actions (Mobile) -->
-          <div class="quick-actions">
-            <VBtn
-              icon
-              size="small"
-              variant="tonal"
-              color="primary"
-              @click="openEditDialog(facility)"
-            >
-              <VIcon icon="bx-edit" size="18" />
-            </VBtn>
-            <VBtn
-              icon
-              size="small"
-              variant="tonal"
-              color="error"
-              @click="openDeleteDialog(facility)"
-            >
-              <VIcon icon="bx-trash" size="18" />
-            </VBtn>
-          </div>
-        </div>
+                  <VIcon :icon="getTypeConfig(facility.facility_type).icon" size="14" class="me-1" />
+                  {{ formatType(facility.facility_type) }}
+                </span>
+              </td>
+              <td>
+                <span class="text-cell">{{ facility.city || '-' }}</span>
+              </td>
+              <td>
+                <span class="text-cell">{{ facility.state || '-' }}</span>
+              </td>
+              <td>
+                <span class="address-cell">{{ facility.address || '-' }}</span>
+              </td>
+              <td v-if="canEdit || canDelete">
+                <div class="action-buttons">
+                  <VBtn
+                    v-if="canEdit"
+                    icon
+                    size="small"
+                    variant="text"
+                    class="action-btn edit-action"
+                    @click="openEditDialog(facility)"
+                  >
+                    <VIcon icon="bx-edit" size="18" />
+                    <VTooltip activator="parent" location="top">Edit</VTooltip>
+                  </VBtn>
+                  <VBtn
+                    v-if="canDelete"
+                    icon
+                    size="small"
+                    variant="text"
+                    class="action-btn delete-action"
+                    @click="openDeleteDialog(facility)"
+                  >
+                    <VIcon icon="bx-trash" size="18" />
+                    <VTooltip activator="parent" location="top">Delete</VTooltip>
+                  </VBtn>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
       <!-- Pagination -->
@@ -665,7 +624,7 @@ onMounted(() => {
           </VBtn>
         </div>
       </div>
-    </div>
+    </VCard>
 
     <!-- Create Dialog -->
     <VDialog v-model="showCreateDialog" max-width="600" persistent class="custom-dialog">
@@ -692,6 +651,7 @@ onMounted(() => {
                 variant="outlined"
                 density="comfortable"
                 placeholder="e.g. WH-001"
+                maxlength="50"
                 :error-messages="formErrors.code"
               >
                 <template #prepend-inner>
@@ -812,6 +772,7 @@ onMounted(() => {
                 variant="outlined"
                 density="comfortable"
                 placeholder="e.g. WH-001"
+                maxlength="50"
                 :error-messages="formErrors.code"
               >
                 <template #prepend-inner>
@@ -924,10 +885,14 @@ onMounted(() => {
             <VIcon icon="bx-info-circle" size="16" />
             This action cannot be undone.
           </p>
+          <div v-if="deleteError" class="delete-error">
+            <VIcon icon="bx-x-circle" size="16" />
+            {{ deleteError }}
+          </div>
         </div>
 
         <div class="dialog-footer delete-footer">
-          <VBtn variant="outlined" size="large" @click="showDeleteDialog = false">
+          <VBtn variant="outlined" size="large" @click="showDeleteDialog = false; deleteError = ''">
             Cancel
           </VBtn>
           <VBtn color="error" size="large" :loading="dialogLoading" @click="handleDelete">
@@ -941,45 +906,25 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* Theme Variables */
+/* Theme Variables - Light mode default */
 .facilities-page {
+  --card-bg: rgba(255, 255, 255, 0.82);
+  --card-border: rgba(0, 0, 0, 0.06);
+  --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --hover-shadow: 0 8px 25px rgba(0, 0, 0, 0.08);
+  --text-primary: #1e293b;
+  --text-secondary: #64748b;
+  --bg-subtle: rgba(0, 0, 0, 0.02);
+  --dialog-bg: #ffffff;
+
   --primary: #6366f1;
   --primary-light: #818cf8;
   --primary-dark: #4f46e5;
   --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;
-  --card-bg: rgba(30, 30, 46, 0.7);
-  --card-bg-subtle: rgba(255, 255, 255, 0.03);
-  --card-border: rgba(255, 255, 255, 0.08);
-  --card-border-hover: rgba(255, 255, 255, 0.15);
-  --surface-bg: rgba(30, 30, 46, 0.5);
-  --dialog-bg: #1e1e2e;
-  --dialog-border: rgba(255, 255, 255, 0.1);
-  --dialog-footer-bg: rgba(0, 0, 0, 0.2);
-  --input-bg: rgba(255, 255, 255, 0.05);
-  --hover-bg: rgba(255, 255, 255, 0.05);
-  --hover-bg-strong: rgba(255, 255, 255, 0.1);
-  --text-heading: #f8fafc;
-  --text-body: #e2e8f0;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
-  --border-line: rgba(255, 255, 255, 0.06);
-  --grad-base-start: #0f0f1a;
-  --grad-base-end: #1a1a2e;
-  --grid-line: rgba(255, 255, 255, 0.02);
-  --shape-opacity: 0.4;
-  --shadow-card: 0 8px 24px rgba(0, 0, 0, 0.2);
-  --shadow-btn: 0 8px 32px rgba(99, 102, 241, 0.35);
-}
-
-.facilities-page.theme-light {
-  --card-bg: rgba(255, 255, 255, 0.9);
-  --card-bg-subtle: rgba(0, 0, 0, 0.02);
-  --card-border: rgba(0, 0, 0, 0.08);
   --card-border-hover: rgba(0, 0, 0, 0.14);
   --surface-bg: rgba(255, 255, 255, 0.8);
-  --dialog-bg: #ffffff;
   --dialog-border: rgba(0, 0, 0, 0.1);
   --dialog-footer-bg: rgba(0, 0, 0, 0.03);
   --input-bg: rgba(0, 0, 0, 0.03);
@@ -987,7 +932,6 @@ onMounted(() => {
   --hover-bg-strong: rgba(0, 0, 0, 0.08);
   --text-heading: #1e293b;
   --text-body: #334155;
-  --text-secondary: #64748b;
   --text-muted: #94a3b8;
   --border-line: rgba(0, 0, 0, 0.06);
   --grad-base-start: #f8f9fe;
@@ -996,6 +940,37 @@ onMounted(() => {
   --shape-opacity: 0.12;
   --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.06);
   --shadow-btn: 0 8px 32px rgba(99, 102, 241, 0.2);
+  --row-hover: rgba(99, 102, 241, 0.04);
+}
+
+.facilities-page.dark-mode {
+  --card-bg: rgba(30, 30, 46, 0.82);
+  --card-border: rgba(255, 255, 255, 0.06);
+  --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --hover-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --bg-subtle: rgba(255, 255, 255, 0.03);
+  --dialog-bg: #1e1e2e;
+
+  --card-border-hover: rgba(255, 255, 255, 0.15);
+  --surface-bg: rgba(30, 30, 46, 0.5);
+  --dialog-border: rgba(255, 255, 255, 0.1);
+  --dialog-footer-bg: rgba(0, 0, 0, 0.2);
+  --input-bg: rgba(255, 255, 255, 0.05);
+  --hover-bg: rgba(255, 255, 255, 0.05);
+  --hover-bg-strong: rgba(255, 255, 255, 0.1);
+  --text-heading: #f8fafc;
+  --text-body: #e2e8f0;
+  --text-muted: #64748b;
+  --border-line: rgba(255, 255, 255, 0.06);
+  --grad-base-start: #0f0f1a;
+  --grad-base-end: #1a1a2e;
+  --grid-line: rgba(255, 255, 255, 0.02);
+  --shape-opacity: 0.4;
+  --shadow-card: 0 8px 24px rgba(0, 0, 0, 0.2);
+  --shadow-btn: 0 8px 32px rgba(99, 102, 241, 0.35);
+  --row-hover: rgba(99, 102, 241, 0.08);
 }
 
 /* Page Layout */
@@ -1155,17 +1130,30 @@ onMounted(() => {
   background: var(--card-bg);
   backdrop-filter: blur(20px);
   border: 1px solid var(--card-border);
-  border-radius: 20px;
+  border-radius: 16px;
   padding: 24px;
   display: flex;
   align-items: center;
   gap: 16px;
   overflow: hidden;
   transition: all 0.3s ease;
+  animation: fadeInUp 0.5s ease both;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .stat-card:hover {
-  transform: translateY(-4px);
+  transform: translateY(-2px);
+  box-shadow: var(--hover-shadow);
   border-color: var(--card-border-hover);
 }
 
@@ -1180,23 +1168,23 @@ onMounted(() => {
 }
 
 .stat-total .stat-icon {
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(139, 92, 246, 0.2));
-  color: var(--primary-light);
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.2), rgba(99, 102, 241, 0.2));
+  color: #3b82f6;
 }
 
 .stat-warehouses .stat-icon {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(52, 211, 153, 0.2));
+  color: #10b981;
+}
+
+.stat-topstate .stat-icon {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(168, 85, 247, 0.2));
+  color: #8b5cf6;
+}
+
+.stat-types .stat-icon {
   background: linear-gradient(135deg, rgba(245, 158, 11, 0.2), rgba(249, 115, 22, 0.2));
-  color: #fbbf24;
-}
-
-.stat-terminals .stat-icon {
-  background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(6, 182, 212, 0.2));
-  color: #34d399;
-}
-
-.stat-states .stat-icon {
-  background: linear-gradient(135deg, rgba(236, 72, 153, 0.2), rgba(168, 85, 247, 0.2));
-  color: #f472b6;
+  color: #f59e0b;
 }
 
 .stat-content {
@@ -1228,19 +1216,19 @@ onMounted(() => {
 }
 
 .stat-total .stat-decoration {
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
 }
 
 .stat-warehouses .stat-decoration {
+  background: linear-gradient(135deg, #10b981, #34d399);
+}
+
+.stat-topstate .stat-decoration {
+  background: linear-gradient(135deg, #8b5cf6, #a855f7);
+}
+
+.stat-types .stat-decoration {
   background: linear-gradient(135deg, #f59e0b, #f97316);
-}
-
-.stat-terminals .stat-decoration {
-  background: linear-gradient(135deg, #10b981, #06b6d4);
-}
-
-.stat-states .stat-decoration {
-  background: linear-gradient(135deg, #ec4899, #a855f7);
 }
 
 /* Filters */
@@ -1248,7 +1236,7 @@ onMounted(() => {
   background: var(--card-bg);
   backdrop-filter: blur(20px);
   border: 1px solid var(--card-border);
-  border-radius: 20px;
+  border-radius: 16px;
   padding: 20px;
   margin-bottom: 28px;
 }
@@ -1303,14 +1291,141 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
-/* Facilities Container */
-.facilities-container {
-  background: var(--surface-bg);
+/* Table Card */
+.table-card {
+  background: var(--card-bg) !important;
   backdrop-filter: blur(20px);
-  border: 1px solid var(--card-border);
-  border-radius: 24px;
-  padding: 24px;
-  min-height: 400px;
+  border: 1px solid var(--card-border) !important;
+  border-radius: 16px !important;
+  overflow: hidden;
+  box-shadow: none !important;
+}
+
+.table-card :deep(.v-card__overlay) {
+  display: none;
+}
+
+/* Table Wrapper */
+.table-wrapper {
+  overflow-x: auto;
+}
+
+.facilities-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.facilities-table th {
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 16px 20px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-line);
+  white-space: nowrap;
+  background: var(--bg-subtle);
+}
+
+.facilities-table td {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border-line);
+  font-size: 14px;
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+
+.table-row {
+  transition: background 0.2s ease;
+  animation: rowFadeIn 0.4s ease both;
+}
+
+@keyframes rowFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.table-row:hover {
+  background: var(--row-hover);
+}
+
+.table-row:last-child td {
+  border-bottom: none;
+}
+
+/* Cell styles */
+.code-cell {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-weight: 600;
+  color: var(--text-heading);
+  font-size: 13px;
+  letter-spacing: 0.3px;
+}
+
+.name-cell {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.text-cell {
+  color: var(--text-secondary);
+}
+
+.address-cell {
+  color: var(--text-secondary);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+
+/* Type Chip */
+.type-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+
+/* Action Buttons */
+.action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.action-btn {
+  border-radius: 8px !important;
+  transition: all 0.2s ease;
+}
+
+.edit-action {
+  color: var(--primary) !important;
+}
+
+.edit-action:hover {
+  background: rgba(99, 102, 241, 0.12) !important;
+}
+
+.delete-action {
+  color: var(--error) !important;
+}
+
+.delete-action:hover {
+  background: rgba(239, 68, 68, 0.12) !important;
 }
 
 /* Loading State */
@@ -1374,194 +1489,12 @@ onMounted(() => {
   margin: 0;
 }
 
-/* Facilities Grid */
-.facilities-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: 20px;
-}
-
-/* Facility Card */
-.facility-card {
-  position: relative;
-  background: var(--card-bg-subtle);
-  border: 1px solid var(--card-border);
-  border-radius: 20px;
-  padding: 24px;
-  transition: all 0.3s ease;
-  animation: cardFadeIn 0.5s ease forwards;
-  animation-delay: var(--delay);
-  opacity: 0;
-  transform: translateY(20px);
-}
-
-@keyframes cardFadeIn {
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.facility-card:hover {
-  border-color: rgba(99, 102, 241, 0.3);
-  transform: translateY(-4px);
-}
-
-.facility-card:hover .card-glow {
-  opacity: 1;
-}
-
-.card-glow {
-  position: absolute;
-  inset: -1px;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), transparent, rgba(139, 92, 246, 0.15));
-  border-radius: 20px;
-  opacity: 0;
-  transition: opacity 0.3s ease;
-  z-index: -1;
-  filter: blur(20px);
-}
-
-/* Facility Header */
-.facility-header {
-  display: flex;
-  align-items: flex-start;
-  gap: 14px;
-  margin-bottom: 14px;
-}
-
-.facility-avatar {
-  width: 52px;
-  height: 52px;
-  border-radius: 14px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  box-shadow: var(--shadow-card);
-}
-
-.facility-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.facility-code {
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text-heading);
-  margin: 0;
-  font-family: monospace;
-  letter-spacing: 0.5px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.facility-name {
-  font-size: 14px;
-  color: var(--text-secondary);
-  margin: 2px 0 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.menu-btn {
-  color: var(--text-muted) !important;
-  margin: -8px -8px 0 0;
-}
-
-.menu-btn:hover {
-  color: var(--text-heading) !important;
-  background: var(--hover-bg-strong) !important;
-}
-
-/* Action Menu */
-.action-menu {
-  background: var(--dialog-bg) !important;
-  border: 1px solid var(--dialog-border);
-  border-radius: 12px !important;
-  padding: 8px !important;
-  min-width: 180px;
-}
-
-.action-menu :deep(.v-list-item) {
-  border-radius: 8px;
-  min-height: 44px;
-}
-
-.action-menu :deep(.v-list-item:hover) {
-  background: var(--input-bg);
-}
-
-.delete-item {
-  margin-top: 4px;
-  border-top: 1px solid var(--card-border);
-  padding-top: 4px;
-}
-
-/* Address */
-.facility-address {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--text-muted);
-  margin-bottom: 16px;
-  line-height: 1.5;
-}
-
-.facility-address .v-icon {
-  color: var(--primary-light);
-  flex-shrink: 0;
-  margin-top: 2px;
-}
-
-/* Footer */
-.facility-footer {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding-top: 16px;
-  border-top: 1px solid var(--border-line);
-}
-
-.type-badge {
-  display: inline-flex;
-  align-items: center;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 6px 12px;
-  border-radius: 8px;
-  border: 1px solid;
-  letter-spacing: 0.3px;
-}
-
-.footer-date {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  color: var(--text-muted);
-}
-
-/* Quick Actions */
-.quick-actions {
-  display: none;
-  gap: 8px;
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid var(--border-line);
-}
-
 /* Pagination */
 .pagination-container {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-top: 28px;
-  padding-top: 20px;
+  padding: 20px;
   border-top: 1px solid var(--border-line);
   flex-wrap: wrap;
   gap: 16px;
@@ -1616,6 +1549,7 @@ onMounted(() => {
 .custom-dialog :deep(.v-overlay__content) {
   margin: 16px;
 }
+
 .custom-dialog :deep(.v-overlay__scrim) {
   background: rgba(0, 0, 0, 0.7) !important;
 }
@@ -1625,9 +1559,11 @@ onMounted(() => {
   border-radius: 24px !important;
   overflow: hidden;
 }
+
 .dialog-card.v-card {
   background: var(--dialog-bg) !important;
 }
+
 .dialog-card :deep(.v-card__overlay) {
   display: none;
 }
@@ -1784,6 +1720,19 @@ onMounted(() => {
   margin: 0;
 }
 
+.delete-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.1);
+  padding: 10px 16px;
+  border-radius: 8px;
+  margin-top: 12px;
+}
+
 .delete-footer {
   justify-content: center;
 }
@@ -1838,20 +1787,14 @@ onMounted(() => {
     min-width: 100%;
   }
 
-  .facilities-grid {
-    grid-template-columns: 1fr;
+  .facilities-table th,
+  .facilities-table td {
+    padding: 12px 14px;
+    font-size: 13px;
   }
 
-  .facility-card {
-    padding: 20px;
-  }
-
-  .menu-btn {
-    display: none !important;
-  }
-
-  .quick-actions {
-    display: flex;
+  .address-cell {
+    max-width: 120px;
   }
 
   .pagination-container {

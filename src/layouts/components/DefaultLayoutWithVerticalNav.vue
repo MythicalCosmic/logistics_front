@@ -74,11 +74,23 @@ const operationsItems = computed(() => [
 ].filter(item => can(item.permission)))
 
 const showOperationsSection = computed(() => operationsItems.value.length > 0)
+
+// Reports section items
+const reportsItems = computed(() => [
+  {
+    title: 'Activity Logs',
+    icon: 'bx-history',
+    to: '/activity-logs',
+    permission: 'reports.view',
+  },
+].filter(item => can(item.permission)))
+
+const showReportsSection = computed(() => reportsItems.value.length > 0)
 </script>
 
 <template>
   <VerticalNavLayout>
-    <!-- 👉 Navbar -->
+    <!-- Navbar -->
     <template #navbar="{ toggleVerticalOverlayNavActive }">
       <div class="d-flex h-100 align-center">
         <IconBtn
@@ -108,7 +120,7 @@ const showOperationsSection = computed(() => operationsItems.value.length > 0)
       </div>
     </template>
 
-    <!-- 👉 Navigation -->
+    <!-- Navigation -->
     <template #vertical-nav-content>
       <!-- Main nav items (visible to all) -->
       <VerticalNavLink
@@ -140,12 +152,24 @@ const showOperationsSection = computed(() => operationsItems.value.length > 0)
           :item="item"
         />
       </template>
+
+      <!-- Reports Section -->
+      <template v-if="showReportsSection">
+        <VerticalNavSectionTitle
+          :item="{ heading: 'Reports' }"
+        />
+        <VerticalNavLink
+          v-for="item in reportsItems"
+          :key="item.title"
+          :item="item"
+        />
+      </template>
     </template>
 
-    <!-- 👉 Page Content -->
+    <!-- Page Content -->
     <slot />
 
-    <!-- 👉 Footer -->
+    <!-- Footer -->
     <template #footer>
       <Footer />
     </template>

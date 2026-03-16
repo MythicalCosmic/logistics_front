@@ -42,6 +42,7 @@ const driverTypes = [
 const loadTypes = [
   { title: 'Drop', value: 'drop' },
   { title: 'Live', value: 'live' },
+  { title: 'Hook', value: 'hook' },
 ]
 
 const directions = [
@@ -91,8 +92,11 @@ const totalPages = computed(() => Math.ceil(totalLoads.value / perPage.value))
 const showCreateDialog = ref(false)
 const showEditDialog = ref(false)
 const showCancelDialog = ref(false)
+const showAssignDialog = ref(false)
 const dialogLoading = ref(false)
 const expandedLoadId = ref(null)
+const assignDriverId = ref(null)
+const usersList = ref([])
 const groupByLoadId = ref(false)
 const expandedGroups = ref({})
 
@@ -286,7 +290,7 @@ const fetchStats = async () => {
 
 const fetchFacilities = async () => {
   try {
-    const response = await api.get('/admin-api/facilities?per_page=100')
+    const response = await api.get('/api/facilities?per_page=100')
     if (response.data.success) {
       facilitiesList.value = response.data.data?.facilities || []
     }
@@ -320,6 +324,8 @@ const handleCreate = async () => {
   formErrors.value = {}
   if (!form.value.origin_facility) formErrors.value.origin_facility = 'Origin facility is required'
   if (!form.value.destination_facility) formErrors.value.destination_facility = 'Destination facility is required'
+  if (!form.value.origin_state) formErrors.value.origin_state = 'Origin state is required'
+  if (!form.value.destination_state) formErrors.value.destination_state = 'Destination state is required'
   if (!form.value.origin_datetime) formErrors.value.origin_datetime = 'Origin datetime is required'
   if (!form.value.destination_datetime) formErrors.value.destination_datetime = 'Destination datetime is required'
   if (!form.value.total_miles) formErrors.value.total_miles = 'Total miles is required'
@@ -330,15 +336,14 @@ const handleCreate = async () => {
   dialogLoading.value = true
   try {
     const response = await api.post('/api/loads/create', {
-      load_id: form.value.load_id || '',
       tour_id: form.value.tour_id || '',
       origin_facility: form.value.origin_facility,
       origin_city: form.value.origin_city || '',
-      origin_state: form.value.origin_state || '',
+      origin_state: form.value.origin_state,
       origin_datetime: toISODatetime(form.value.origin_datetime),
       destination_facility: form.value.destination_facility,
       destination_city: form.value.destination_city || '',
-      destination_state: form.value.destination_state || '',
+      destination_state: form.value.destination_state,
       destination_datetime: toISODatetime(form.value.destination_datetime),
       total_stops: Number(form.value.total_stops) || 2,
       total_miles: Number(form.value.total_miles),
@@ -375,7 +380,6 @@ const handleUpdate = async () => {
   dialogLoading.value = true
   try {
     const response = await api.put(`/api/loads/${selectedLoad.value.id}/update`, {
-      load_id: form.value.load_id || '',
       tour_id: form.value.tour_id || '',
       origin_facility: form.value.origin_facility,
       origin_city: form.value.origin_city || '',
@@ -413,6 +417,40 @@ const handleCancel = async () => {
       toastSuccess('Load cancelled successfully')
       showCancelDialog.value = false
       selectedLoad.value = null
+      fetchLoads()
+      fetchStats()
+    }
+  } catch (error) { /* interceptor */ }
+  finally { dialogLoading.value = false }
+}
+
+// Assign driver
+const openAssignDialog = (load) => {
+  selectedLoad.value = load
+  assignDriverId.value = load.assigned_driver?.id || null
+  showAssignDialog.value = true
+  if (!usersList.value.length) fetchUsers()
+}
+
+const fetchUsers = async () => {
+  try {
+    const response = await api.get('/admin-api/users?per_page=100&is_active=true')
+    if (response.data.success) {
+      usersList.value = response.data.data?.users || []
+    }
+  } catch (error) { /* non-critical */ }
+}
+
+const handleAssignDriver = async () => {
+  if (!selectedLoad.value || !assignDriverId.value) return
+  dialogLoading.value = true
+  try {
+    const response = await api.post(`/api/loads/${selectedLoad.value.id}/assign`, { driver_id: assignDriverId.value })
+    if (response.data.success) {
+      toastSuccess('Driver assigned successfully')
+      showAssignDialog.value = false
+      selectedLoad.value = null
+      assignDriverId.value = null
       fetchLoads()
       fetchStats()
     }
@@ -1186,6 +1224,13 @@ onMounted(() => {
                     </VListItem>
                   </template>
                   <VListItem
+                    v-if="canEdit && load.status === 'available'"
+                    @click="openAssignDialog(load)"
+                  >
+                    <template #prepend><VIcon icon="bx-user-plus" color="success" /></template>
+                    <VListItemTitle>Assign Driver</VListItemTitle>
+                  </VListItem>
+                  <VListItem
                     v-if="canEditLoad(load)"
                     @click="openCancelDialog(load)"
                     class="delete-item"
@@ -1485,13 +1530,9 @@ onMounted(() => {
 
           <div class="form-section-title">Identification</div>
           <div class="form-grid">
-            <div class="form-group">
-              <label class="form-label">Load ID</label>
-              <VTextField v-model="form.load_id" variant="outlined" density="comfortable" placeholder="External load ID" />
-            </div>
-            <div class="form-group">
+            <div class="form-group full-width">
               <label class="form-label">Tour ID</label>
-              <VTextField v-model="form.tour_id" variant="outlined" density="comfortable" placeholder="Tour identifier" />
+              <VTextField v-model="form.tour_id" variant="outlined" density="comfortable" placeholder="Tour identifier (optional)" />
             </div>
           </div>
 
@@ -1517,8 +1558,8 @@ onMounted(() => {
               <VTextField v-model="form.origin_city" variant="outlined" density="comfortable" placeholder="City" />
             </div>
             <div class="form-group">
-              <label class="form-label">State</label>
-              <VTextField v-model="form.origin_state" variant="outlined" density="comfortable" placeholder="State" />
+              <label class="form-label">State <span class="required">*</span></label>
+              <VTextField v-model="form.origin_state" variant="outlined" density="comfortable" placeholder="e.g. TX" :error-messages="formErrors.origin_state" />
             </div>
             <div class="form-group full-width">
               <label class="form-label">Pickup Date & Time <span class="required">*</span></label>
@@ -1548,8 +1589,8 @@ onMounted(() => {
               <VTextField v-model="form.destination_city" variant="outlined" density="comfortable" placeholder="City" />
             </div>
             <div class="form-group">
-              <label class="form-label">State</label>
-              <VTextField v-model="form.destination_state" variant="outlined" density="comfortable" placeholder="State" />
+              <label class="form-label">State <span class="required">*</span></label>
+              <VTextField v-model="form.destination_state" variant="outlined" density="comfortable" placeholder="e.g. NY" :error-messages="formErrors.destination_state" />
             </div>
             <div class="form-group full-width">
               <label class="form-label">Delivery Date & Time <span class="required">*</span></label>
@@ -1594,6 +1635,45 @@ onMounted(() => {
           <VBtn class="submit-btn" size="large" :loading="dialogLoading" @click="handleCreate">
             <VIcon icon="bx-plus" class="me-2" />
             Create Load
+          </VBtn>
+        </div>
+      </VCard>
+    </VDialog>
+
+    <!-- Assign Driver Dialog -->
+    <VDialog v-model="showAssignDialog" max-width="450" class="custom-dialog">
+      <VCard class="dialog-card" :style="dialogStyle">
+        <div class="dialog-header">
+          <div class="dialog-icon create"><VIcon icon="bx-user-plus" size="28" /></div>
+          <div>
+            <h2 class="dialog-title">Assign Driver</h2>
+            <p class="dialog-subtitle">Assign a driver to load {{ selectedLoad?.load_id || `#${selectedLoad?.id}` }}</p>
+          </div>
+          <VBtn icon variant="text" class="close-btn" @click="showAssignDialog = false">
+            <VIcon icon="bx-x" />
+          </VBtn>
+        </div>
+        <VCardText class="dialog-body">
+          <div class="form-group">
+            <label class="form-label">Select Driver <span class="required">*</span></label>
+            <VSelect
+              v-model="assignDriverId"
+              :items="usersList.map(u => ({ title: u.full_name + ' (' + u.email + ')', value: u.id }))"
+              item-title="title"
+              item-value="value"
+              variant="outlined"
+              density="comfortable"
+              placeholder="Choose a driver..."
+            >
+              <template #prepend-inner><VIcon icon="bx-user" /></template>
+            </VSelect>
+          </div>
+        </VCardText>
+        <div class="dialog-footer">
+          <VBtn variant="outlined" size="large" @click="showAssignDialog = false">Cancel</VBtn>
+          <VBtn class="submit-btn" size="large" :loading="dialogLoading" :disabled="!assignDriverId" @click="handleAssignDriver">
+            <VIcon icon="bx-user-check" class="me-2" />
+            Assign
           </VBtn>
         </div>
       </VCard>
@@ -1735,8 +1815,8 @@ onMounted(() => {
 .loads-page {
   --primary: #6366f1;
   --primary-light: #818cf8;
-  --card-bg: rgba(30, 30, 46, 0.7);
-  --card-bg-subtle: rgba(255, 255, 255, 0.03);
+  --card-bg: rgba(30, 30, 46, 0.85);
+  --card-bg-subtle: rgba(255, 255, 255, 0.04);
   --card-border: rgba(255, 255, 255, 0.08);
   --card-border-hover: rgba(255, 255, 255, 0.15);
   --surface-bg: rgba(30, 30, 46, 0.5);
@@ -1760,7 +1840,7 @@ onMounted(() => {
 }
 
 .loads-page.theme-light {
-  --card-bg: rgba(255, 255, 255, 0.9);
+  --card-bg: rgba(255, 255, 255, 0.92);
   --card-bg-subtle: rgba(0, 0, 0, 0.02);
   --card-border: rgba(0, 0, 0, 0.08);
   --card-border-hover: rgba(0, 0, 0, 0.14);

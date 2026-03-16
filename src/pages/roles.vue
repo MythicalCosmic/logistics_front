@@ -20,12 +20,13 @@ const canDelete = computed(() => authStore.hasPermission('roles.delete'))
 // Data
 const roles = ref([])
 const allPermissions = ref([])
+const groupedPermissionsFromApi = ref({})
 const loading = ref(false)
 const totalRoles = ref(0)
 
 // Pagination & Filters
 const page = ref(1)
-const perPage = ref(10)
+const perPage = ref(12)
 const search = ref('')
 const totalPages = computed(() => Math.ceil(totalRoles.value / perPage.value))
 
@@ -35,6 +36,7 @@ const showEditDialog = ref(false)
 const showDeleteDialog = ref(false)
 const showPermissionsDialog = ref(false)
 const dialogLoading = ref(false)
+const permissionsSaving = ref(false)
 
 // Form Data
 const defaultForm = {
@@ -67,16 +69,26 @@ const stats = computed(() => {
   return { total: totalRoles.value, totalPermissions: 0, mostUsedRole: null, rolesWithUsers: 0 }
 })
 
-// Grouped permissions by module
+// Grouped permissions by module (prefer API grouped data, fallback to manual grouping)
 const groupedPermissions = computed(() => {
+  if (Object.keys(groupedPermissionsFromApi.value).length > 0) {
+    return groupedPermissionsFromApi.value
+  }
   const groups = {}
   allPermissions.value.forEach(perm => {
-    const parts = perm.name.split('.')
-    const module = parts.length > 1 ? parts[0] : 'general'
+    const module = perm.module || (perm.codename ? perm.codename.split('.')[0] : 'general')
     if (!groups[module]) groups[module] = []
     groups[module].push(perm)
   })
   return groups
+})
+
+// Check if permissions have changed
+const permissionsChanged = computed(() => {
+  if (selectedPermissionIds.value.length !== originalPermissionIds.value.length) return true
+  const sorted1 = [...selectedPermissionIds.value].sort()
+  const sorted2 = [...originalPermissionIds.value].sort()
+  return sorted1.some((id, i) => id !== sorted2[i])
 })
 
 const fetchStats = async () => {
@@ -106,7 +118,6 @@ const fetchRoles = async () => {
 
     if (response.data.success) {
       const rawRoles = response.data.data?.roles || response.data.data || []
-      // Enrich roles with stats data if available (permission_count, user_count)
       const statsRoles = serverStats.value?.roles || []
       roles.value = rawRoles.map(role => {
         const statsMatch = statsRoles.find(s => s.id === role.id)
@@ -132,6 +143,9 @@ const fetchPermissions = async () => {
     const response = await api.get('/admin-api/permissions')
     if (response.data.success) {
       allPermissions.value = response.data.data?.permissions || response.data.data || []
+      if (response.data.data?.grouped) {
+        groupedPermissionsFromApi.value = response.data.data.grouped
+      }
     }
   } catch (error) {
     console.error('Failed to fetch permissions:', error)
@@ -152,8 +166,10 @@ const generateSlug = (name) => {
 const handleCreate = async () => {
   formErrors.value = {}
 
-  if (!form.value.name) formErrors.value.name = 'Role name is required'
-  if (!form.value.slug) formErrors.value.slug = 'Slug is required'
+  if (!form.value.name?.trim()) formErrors.value.name = 'Role name is required'
+  if (form.value.name?.length > 50) formErrors.value.name = 'Name must be 50 characters or less'
+  if (!form.value.slug?.trim()) formErrors.value.slug = 'Slug is required'
+  if (form.value.slug?.length > 50) formErrors.value.slug = 'Slug must be 50 characters or less'
 
   if (Object.keys(formErrors.value).length > 0) return
 
@@ -161,9 +177,9 @@ const handleCreate = async () => {
 
   try {
     const response = await api.post('/admin-api/roles/create', {
-      name: form.value.name,
-      slug: form.value.slug,
-      description: form.value.description || '',
+      name: form.value.name.trim(),
+      slug: form.value.slug.trim(),
+      description: form.value.description?.trim() || '',
     })
 
     if (response.data.success) {
@@ -184,8 +200,10 @@ const handleCreate = async () => {
 const handleUpdate = async () => {
   formErrors.value = {}
 
-  if (!form.value.name) formErrors.value.name = 'Role name is required'
-  if (!form.value.slug) formErrors.value.slug = 'Slug is required'
+  if (!form.value.name?.trim()) formErrors.value.name = 'Role name is required'
+  if (form.value.name?.length > 50) formErrors.value.name = 'Name must be 50 characters or less'
+  if (!form.value.slug?.trim()) formErrors.value.slug = 'Slug is required'
+  if (form.value.slug?.length > 50) formErrors.value.slug = 'Slug must be 50 characters or less'
 
   if (Object.keys(formErrors.value).length > 0) return
 
@@ -193,9 +211,9 @@ const handleUpdate = async () => {
 
   try {
     const response = await api.put(`/admin-api/roles/${selectedRole.value.id}/update`, {
-      name: form.value.name,
-      slug: form.value.slug,
-      description: form.value.description || '',
+      name: form.value.name.trim(),
+      slug: form.value.slug.trim(),
+      description: form.value.description?.trim() || '',
     })
 
     if (response.data.success) {
@@ -203,6 +221,7 @@ const handleUpdate = async () => {
       showEditDialog.value = false
       resetForm()
       fetchRoles()
+      fetchStats()
     }
   } catch (error) {
     // Handled by interceptor
@@ -234,25 +253,29 @@ const handleDelete = async () => {
   }
 }
 
-// Save permissions (diff: add new, remove unchecked)
+// Save permissions (diff: bulk add new, individually remove unchecked)
 const handleSavePermissions = async () => {
   if (!selectedRole.value) return
 
-  dialogLoading.value = true
+  permissionsSaving.value = true
   const roleId = selectedRole.value.id
 
   try {
     const toAdd = selectedPermissionIds.value.filter(id => !originalPermissionIds.value.includes(id))
     const toRemove = originalPermissionIds.value.filter(id => !selectedPermissionIds.value.includes(id))
 
-    // Add new permissions
-    for (const permId of toAdd) {
-      await api.post(`/admin-api/roles/${roleId}/permissions`, { permission_id: permId })
+    // Bulk add new permissions
+    if (toAdd.length > 0) {
+      await api.post(`/admin-api/roles/${roleId}/permissions/bulk`, {
+        permission_ids: toAdd,
+      })
     }
 
-    // Remove unchecked permissions
+    // Remove unchecked permissions one by one
     for (const permId of toRemove) {
-      await api.delete(`/admin-api/roles/${roleId}/permissions/remove`, { data: { permission_id: permId } })
+      await api.delete(`/admin-api/roles/${roleId}/permissions/remove`, {
+        data: { permission_id: permId },
+      })
     }
 
     toastSuccess('Permissions updated successfully')
@@ -263,9 +286,9 @@ const handleSavePermissions = async () => {
     fetchRoles()
     fetchStats()
   } catch (error) {
-    // Handled by interceptor
+    toastError('Failed to update some permissions')
   } finally {
-    dialogLoading.value = false
+    permissionsSaving.value = false
   }
 }
 
@@ -293,10 +316,13 @@ const openPermissionsDialog = async (role) => {
   showPermissionsDialog.value = true
 
   try {
-    // Fetch role detail to get current permissions
-    const response = await api.get(`/admin-api/roles/${role.id}`)
-    if (response.data.success) {
-      const roleData = response.data.data?.role || response.data.data
+    const [roleRes] = await Promise.all([
+      api.get(`/admin-api/roles/${role.id}`),
+      allPermissions.value.length === 0 ? fetchPermissions() : Promise.resolve(),
+    ])
+
+    if (roleRes.data.success) {
+      const roleData = roleRes.data.data?.role || roleRes.data.data
       const ids = (roleData.permissions || []).map(p => p.id)
       selectedPermissionIds.value = [...ids]
       originalPermissionIds.value = [...ids]
@@ -350,6 +376,7 @@ const getRoleColor = (roleName) => {
   if (name.includes('manager')) return { bg: 'rgba(156, 39, 176, 0.15)', text: '#9c27b0', border: 'rgba(156, 39, 176, 0.3)', gradient: 'linear-gradient(135deg, #9c27b0, #7b1fa2)' }
   if (name.includes('editor')) return { bg: 'rgba(0, 150, 136, 0.15)', text: '#009688', border: 'rgba(0, 150, 136, 0.3)', gradient: 'linear-gradient(135deg, #009688, #00796b)' }
   if (name.includes('driver')) return { bg: 'rgba(33, 150, 243, 0.15)', text: '#2196f3', border: 'rgba(33, 150, 243, 0.3)', gradient: 'linear-gradient(135deg, #2196f3, #1976d2)' }
+  if (name.includes('dispatch')) return { bg: 'rgba(0, 188, 212, 0.15)', text: '#00bcd4', border: 'rgba(0, 188, 212, 0.3)', gradient: 'linear-gradient(135deg, #00bcd4, #0097a7)' }
   return { bg: 'rgba(99, 102, 241, 0.15)', text: '#818cf8', border: 'rgba(99, 102, 241, 0.3)', gradient: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }
 }
 
@@ -361,6 +388,7 @@ const getRoleIcon = (roleName) => {
   if (name.includes('manager')) return 'bx-briefcase'
   if (name.includes('editor')) return 'bx-edit-alt'
   if (name.includes('driver')) return 'bx-car'
+  if (name.includes('dispatch')) return 'bx-navigation'
   return 'bx-user-check'
 }
 
@@ -370,11 +398,38 @@ const getModuleIcon = (moduleName) => {
   if (name.includes('user')) return 'bx-user'
   if (name.includes('role')) return 'bx-shield'
   if (name.includes('load')) return 'bx-package'
-  if (name.includes('order')) return 'bx-cart'
+  if (name.includes('facilit')) return 'bx-building-house'
   if (name.includes('report')) return 'bx-bar-chart-alt-2'
+  if (name.includes('analytic')) return 'bx-line-chart'
+  if (name.includes('order')) return 'bx-cart'
   if (name.includes('setting')) return 'bx-cog'
   return 'bx-lock-alt'
 }
+
+// Get module color
+const getModuleColor = (moduleName) => {
+  const name = moduleName.toLowerCase()
+  if (name.includes('user')) return '#6366f1'
+  if (name.includes('role')) return '#f59e0b'
+  if (name.includes('load')) return '#10b981'
+  if (name.includes('facilit')) return '#06b6d4'
+  if (name.includes('report')) return '#ec4899'
+  if (name.includes('analytic')) return '#8b5cf6'
+  return '#6366f1'
+}
+
+// Format date
+const formatDate = (dateString) => {
+  if (!dateString) return '-'
+  return new Date(dateString).toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  })
+}
+
+// Filtered roles (client-side for instant feel)
+const filteredRoles = computed(() => roles.value)
 
 // Watch for filter changes
 let searchTimeout = null
@@ -398,7 +453,6 @@ watch(() => form.value.name, (newName) => {
 })
 
 onMounted(async () => {
-  // Fetch stats first so roles can be enriched with counts
   await fetchStats()
   fetchRoles()
   fetchPermissions()
@@ -406,7 +460,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="roles-page" :class="{ 'theme-light': !isDark }">
+  <div class="roles-page" :class="{ 'dark-mode': isDark }">
     <!-- Animated Background -->
     <div class="page-bg">
       <div class="bg-gradient"></div>
@@ -461,7 +515,18 @@ onMounted(async () => {
         </div>
         <div class="stat-content">
           <span class="stat-value">{{ stats.totalPermissions }}</span>
-          <span class="stat-label">Permissions</span>
+          <span class="stat-label">Total Permissions</span>
+        </div>
+        <div class="stat-decoration"></div>
+      </div>
+
+      <div class="stat-card stat-popular">
+        <div class="stat-icon">
+          <VIcon icon="bx-trending-up" size="28" />
+        </div>
+        <div class="stat-content">
+          <span class="stat-value stat-value-text">{{ stats.mostUsedRole?.name || '-' }}</span>
+          <span class="stat-label">Most Used Role</span>
         </div>
         <div class="stat-decoration"></div>
       </div>
@@ -472,58 +537,35 @@ onMounted(async () => {
         </div>
         <div class="stat-content">
           <span class="stat-value">{{ stats.rolesWithUsers }}</span>
-          <span class="stat-label">Roles In Use</span>
-        </div>
-        <div class="stat-decoration"></div>
-      </div>
-
-      <div class="stat-card stat-popular">
-        <div class="stat-icon">
-          <VIcon icon="bx-trending-up" size="28" />
-        </div>
-        <div class="stat-content">
-          <span class="stat-value">{{ stats.mostUsedRole?.name || '-' }}</span>
-          <span class="stat-label">Most Used Role</span>
+          <span class="stat-label">Roles With Users</span>
         </div>
         <div class="stat-decoration"></div>
       </div>
     </div>
 
-    <!-- Filters Section -->
-    <div class="filters-card">
-      <div class="filters-header">
-        <VIcon icon="bx-filter-alt" class="filter-icon" />
-        <span>Filters</span>
-      </div>
-      <div class="filters-body">
-        <div class="filter-item search-filter">
-          <VTextField
-            v-model="search"
-            placeholder="Search roles by name or slug..."
-            variant="outlined"
-            density="comfortable"
-            hide-details
-            clearable
-            class="search-input"
-          >
-            <template #prepend-inner>
-              <VIcon icon="bx-search" class="search-icon" />
-            </template>
-          </VTextField>
-        </div>
-
-        <VBtn
-          variant="tonal"
-          class="clear-btn"
-          @click="search = ''"
+    <!-- Search Bar -->
+    <div class="search-card">
+      <div class="search-wrapper">
+        <VTextField
+          v-model="search"
+          placeholder="Search roles by name or slug..."
+          variant="outlined"
+          density="comfortable"
+          hide-details
+          clearable
+          class="search-input"
         >
-          <VIcon icon="bx-refresh" class="me-2" />
-          Reset
-        </VBtn>
+          <template #prepend-inner>
+            <VIcon icon="bx-search" class="search-icon" />
+          </template>
+        </VTextField>
+        <div class="search-info">
+          <span class="results-count">{{ totalRoles }} role{{ totalRoles !== 1 ? 's' : '' }}</span>
+        </div>
       </div>
     </div>
 
-    <!-- Roles List -->
+    <!-- Roles Grid Section -->
     <div class="roles-container">
       <!-- Loading State -->
       <div v-if="loading" class="loading-state">
@@ -534,7 +576,7 @@ onMounted(async () => {
       </div>
 
       <!-- Empty State -->
-      <div v-else-if="!roles.length" class="empty-state">
+      <div v-else-if="!filteredRoles.length" class="empty-state">
         <div class="empty-icon">
           <VIcon icon="bx-shield-x" size="64" />
         </div>
@@ -553,10 +595,10 @@ onMounted(async () => {
       <!-- Roles Grid -->
       <div v-else class="roles-grid">
         <div
-          v-for="(role, index) in roles"
+          v-for="(role, index) in filteredRoles"
           :key="role.id"
           class="role-card"
-          :style="{ '--delay': `${index * 0.05}s` }"
+          :style="{ '--delay': `${index * 0.06}s` }"
         >
           <div class="card-glow"></div>
 
@@ -567,12 +609,29 @@ onMounted(async () => {
             </div>
 
             <div class="role-info">
-              <h3 class="role-name">{{ role.name }}</h3>
-              <p class="role-slug">{{ role.slug }}</p>
+              <div class="role-name-row">
+                <h3 class="role-name">{{ role.name }}</h3>
+                <span
+                  v-if="role.is_default"
+                  class="default-badge"
+                >
+                  Default
+                </span>
+              </div>
+              <span
+                class="slug-badge"
+                :style="{
+                  background: getRoleColor(role.name).bg,
+                  color: getRoleColor(role.name).text,
+                  borderColor: getRoleColor(role.name).border,
+                }"
+              >
+                {{ role.slug }}
+              </span>
             </div>
 
             <!-- Actions Menu -->
-            <VMenu location="bottom end" :close-on-content-click="true">
+            <VMenu v-if="canEdit || canDelete" location="bottom end" :close-on-content-click="true">
               <template #activator="{ props }">
                 <VBtn
                   v-bind="props"
@@ -615,31 +674,33 @@ onMounted(async () => {
             {{ role.description || 'No description provided' }}
           </p>
 
-          <!-- Permissions Count -->
-          <div class="role-permissions-info">
-            <div class="permission-count">
-              <VIcon icon="bx-lock-alt" size="16" />
-              <span>{{ role.permission_count ?? role.permissions?.length ?? 0 }} permissions</span>
+          <!-- Stats Row -->
+          <div class="role-stats">
+            <div class="role-stat">
+              <div class="role-stat-icon users-icon">
+                <VIcon icon="bx-user" size="16" />
+              </div>
+              <div class="role-stat-text">
+                <span class="role-stat-value">{{ role.user_count ?? 0 }}</span>
+                <span class="role-stat-label">Users</span>
+              </div>
             </div>
-            <div class="user-count">
-              <VIcon icon="bx-user" size="16" />
-              <span>{{ role.user_count ?? 0 }} users</span>
+            <div class="role-stat">
+              <div class="role-stat-icon perms-icon">
+                <VIcon icon="bx-lock-alt" size="16" />
+              </div>
+              <div class="role-stat-text">
+                <span class="role-stat-value">{{ role.permission_count ?? 0 }}</span>
+                <span class="role-stat-label">Permissions</span>
+              </div>
             </div>
           </div>
 
           <!-- Footer -->
           <div class="role-footer">
-            <div class="footer-item">
-              <span
-                class="role-badge"
-                :style="{
-                  background: getRoleColor(role.name).bg,
-                  color: getRoleColor(role.name).text,
-                  borderColor: getRoleColor(role.name).border,
-                }"
-              >
-                {{ role.slug }}
-              </span>
+            <div class="footer-left">
+              <VIcon icon="bx-calendar" size="14" />
+              <span>{{ formatDate(role.created_at) }}</span>
             </div>
             <VBtn
               v-if="canEdit"
@@ -690,7 +751,7 @@ onMounted(async () => {
       </div>
 
       <!-- Pagination -->
-      <div v-if="roles.length && totalPages > 1" class="pagination-container">
+      <div v-if="filteredRoles.length && totalPages > 1" class="pagination-container">
         <div class="pagination-info">
           Showing <strong>{{ (page - 1) * perPage + 1 }}</strong> to
           <strong>{{ Math.min(page * perPage, totalRoles) }}</strong> of
@@ -734,7 +795,7 @@ onMounted(async () => {
       </div>
     </div>
 
-    <!-- Create Dialog -->
+    <!-- ========== CREATE DIALOG ========== -->
     <VDialog v-model="showCreateDialog" max-width="550" persistent class="custom-dialog">
       <VCard class="dialog-card">
         <div class="dialog-header">
@@ -760,6 +821,8 @@ onMounted(async () => {
                 density="comfortable"
                 placeholder="e.g. Content Manager"
                 :error-messages="formErrors.name"
+                maxlength="50"
+                counter
               >
                 <template #prepend-inner>
                   <VIcon icon="bx-shield" />
@@ -774,6 +837,10 @@ onMounted(async () => {
                 density="comfortable"
                 placeholder="e.g. content-manager"
                 :error-messages="formErrors.slug"
+                maxlength="50"
+                counter
+                hint="Auto-generated from name. You can edit manually."
+                persistent-hint
               >
                 <template #prepend-inner>
                   <VIcon icon="bx-hash" />
@@ -810,7 +877,7 @@ onMounted(async () => {
       </VCard>
     </VDialog>
 
-    <!-- Edit Dialog -->
+    <!-- ========== EDIT DIALOG ========== -->
     <VDialog v-model="showEditDialog" max-width="550" persistent class="custom-dialog">
       <VCard class="dialog-card">
         <div class="dialog-header">
@@ -836,6 +903,8 @@ onMounted(async () => {
                 density="comfortable"
                 placeholder="e.g. Content Manager"
                 :error-messages="formErrors.name"
+                maxlength="50"
+                counter
               >
                 <template #prepend-inner>
                   <VIcon icon="bx-shield" />
@@ -850,6 +919,8 @@ onMounted(async () => {
                 density="comfortable"
                 placeholder="e.g. content-manager"
                 :error-messages="formErrors.slug"
+                maxlength="50"
+                counter
               >
                 <template #prepend-inner>
                   <VIcon icon="bx-hash" />
@@ -886,11 +957,11 @@ onMounted(async () => {
       </VCard>
     </VDialog>
 
-    <!-- Delete Dialog -->
+    <!-- ========== DELETE DIALOG ========== -->
     <VDialog v-model="showDeleteDialog" max-width="450" class="custom-dialog">
       <VCard class="dialog-card delete-dialog">
         <div class="delete-content">
-          <div class="delete-icon">
+          <div class="delete-icon-wrapper">
             <VIcon icon="bx-error-circle" size="64" />
           </div>
           <h2 class="delete-title">Delete Role</h2>
@@ -898,17 +969,31 @@ onMounted(async () => {
             Are you sure you want to delete
             <strong>{{ selectedRole?.name }}</strong>?
           </p>
-          <p class="delete-warning">
+          <div v-if="selectedRole?.is_default" class="delete-warning error-warning">
+            <VIcon icon="bx-x-circle" size="16" />
+            <span>Default roles cannot be deleted.</span>
+          </div>
+          <div v-else-if="selectedRole?.user_count > 0" class="delete-warning error-warning">
+            <VIcon icon="bx-x-circle" size="16" />
+            <span>Roles with assigned users cannot be deleted. Remove all users first.</span>
+          </div>
+          <div v-else class="delete-warning">
             <VIcon icon="bx-info-circle" size="16" />
-            This will remove the role from all assigned users.
-          </p>
+            <span>This action cannot be undone.</span>
+          </div>
         </div>
 
         <div class="dialog-footer delete-footer">
           <VBtn variant="outlined" size="large" @click="showDeleteDialog = false">
             Cancel
           </VBtn>
-          <VBtn color="error" size="large" :loading="dialogLoading" @click="handleDelete">
+          <VBtn
+            color="error"
+            size="large"
+            :loading="dialogLoading"
+            :disabled="selectedRole?.is_default || selectedRole?.user_count > 0"
+            @click="handleDelete"
+          >
             <VIcon icon="bx-trash" class="me-2" />
             Delete Role
           </VBtn>
@@ -916,8 +1001,8 @@ onMounted(async () => {
       </VCard>
     </VDialog>
 
-    <!-- Permissions Dialog -->
-    <VDialog v-model="showPermissionsDialog" max-width="700" persistent class="custom-dialog">
+    <!-- ========== PERMISSIONS DIALOG ========== -->
+    <VDialog v-model="showPermissionsDialog" max-width="720" persistent class="custom-dialog">
       <VCard class="dialog-card">
         <div class="dialog-header">
           <div class="dialog-icon permissions">
@@ -929,12 +1014,18 @@ onMounted(async () => {
               Configure permissions for <strong>{{ selectedRole?.name }}</strong>
             </p>
           </div>
-          <VBtn icon variant="text" class="close-btn" @click="showPermissionsDialog = false; selectedPermissionIds = []; originalPermissionIds = []">
+          <VBtn
+            icon
+            variant="text"
+            class="close-btn"
+            @click="showPermissionsDialog = false; selectedPermissionIds = []; originalPermissionIds = []"
+          >
             <VIcon icon="bx-x" />
           </VBtn>
         </div>
 
         <VCardText class="dialog-body permissions-body">
+          <!-- Loading permissions -->
           <div v-if="dialogLoading && !Object.keys(groupedPermissions).length" class="loading-state" style="padding: 40px;">
             <div class="loading-spinner">
               <div class="spinner"></div>
@@ -942,6 +1033,7 @@ onMounted(async () => {
             <p>Loading permissions...</p>
           </div>
 
+          <!-- Permissions grouped by module -->
           <div v-else class="permissions-grid">
             <div
               v-for="(perms, moduleName) in groupedPermissions"
@@ -950,11 +1042,13 @@ onMounted(async () => {
             >
               <div class="module-header" @click="toggleModulePermissions(moduleName)">
                 <div class="module-info">
-                  <div class="module-icon">
+                  <div class="module-icon" :style="{ background: `${getModuleColor(moduleName)}22`, color: getModuleColor(moduleName) }">
                     <VIcon :icon="getModuleIcon(moduleName)" size="20" />
                   </div>
                   <span class="module-name">{{ moduleName }}</span>
-                  <span class="module-count">{{ perms.filter(p => selectedPermissionIds.includes(p.id)).length }}/{{ perms.length }}</span>
+                  <span class="module-count">
+                    {{ perms.filter(p => selectedPermissionIds.includes(p.id)).length }}/{{ perms.length }}
+                  </span>
                 </div>
                 <VCheckbox
                   :model-value="isModuleFullySelected(moduleName)"
@@ -987,8 +1081,8 @@ onMounted(async () => {
                     }"
                   />
                   <div class="permission-info">
-                    <span class="permission-name">{{ perm.name }}</span>
-                    <span v-if="perm.description" class="permission-desc">{{ perm.description }}</span>
+                    <span class="permission-codename">{{ perm.codename || perm.name }}</span>
+                    <span v-if="perm.name && perm.codename" class="permission-label">{{ perm.name }}</span>
                   </div>
                 </label>
               </div>
@@ -996,16 +1090,29 @@ onMounted(async () => {
           </div>
         </VCardText>
 
-        <div class="dialog-footer">
+        <div class="dialog-footer permissions-footer">
           <div class="footer-info">
             <VIcon icon="bx-check-circle" size="16" />
-            <span>{{ selectedPermissionIds.length }} permissions selected</span>
+            <span>{{ selectedPermissionIds.length }} permission{{ selectedPermissionIds.length !== 1 ? 's' : '' }} selected</span>
+            <span v-if="permissionsChanged" class="changes-indicator">
+              (unsaved changes)
+            </span>
           </div>
           <div class="footer-actions">
-            <VBtn variant="outlined" size="large" @click="showPermissionsDialog = false; selectedPermissionIds = []; originalPermissionIds = []">
+            <VBtn
+              variant="outlined"
+              size="large"
+              @click="showPermissionsDialog = false; selectedPermissionIds = []; originalPermissionIds = []"
+            >
               Cancel
             </VBtn>
-            <VBtn class="submit-btn permissions-save" size="large" :loading="dialogLoading" @click="handleSavePermissions">
+            <VBtn
+              class="submit-btn permissions-save"
+              size="large"
+              :loading="permissionsSaving"
+              :disabled="!permissionsChanged"
+              @click="handleSavePermissions"
+            >
               <VIcon icon="bx-check" class="me-2" />
               Save Permissions
             </VBtn>
@@ -1017,46 +1124,28 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-/* Theme Variables */
+/* ============================================
+   THEME VARIABLES
+   ============================================ */
 .roles-page {
+  --card-bg: rgba(255, 255, 255, 0.82);
+  --card-border: rgba(0, 0, 0, 0.06);
+  --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --hover-shadow: 0 8px 25px rgba(0, 0, 0, 0.08);
+  --text-primary: #1e293b;
+  --text-secondary: #64748b;
+  --bg-subtle: rgba(0, 0, 0, 0.02);
+  --dialog-bg: #ffffff;
+
   --primary: #6366f1;
   --primary-light: #818cf8;
   --primary-dark: #4f46e5;
   --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;
-  --card-bg: rgba(30, 30, 46, 0.7);
-  --card-bg-subtle: rgba(255, 255, 255, 0.03);
-  --card-border: rgba(255, 255, 255, 0.08);
-  --card-border-hover: rgba(255, 255, 255, 0.15);
-  --surface-bg: rgba(30, 30, 46, 0.5);
-  --dialog-bg: #1e1e2e;
-  --dialog-border: rgba(255, 255, 255, 0.1);
-  --dialog-footer-bg: rgba(0, 0, 0, 0.2);
-  --input-bg: rgba(255, 255, 255, 0.05);
-  --hover-bg: rgba(255, 255, 255, 0.05);
-  --hover-bg-strong: rgba(255, 255, 255, 0.1);
-  --text-heading: #f8fafc;
-  --text-body: #e2e8f0;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
-  --border-line: rgba(255, 255, 255, 0.06);
-  --status-ring: #1e1e2e;
-  --grad-base-start: #0f0f1a;
-  --grad-base-end: #1a1a2e;
-  --grid-line: rgba(255, 255, 255, 0.02);
-  --shape-opacity: 0.4;
-  --shadow-card: 0 8px 24px rgba(0, 0, 0, 0.2);
-  --shadow-btn: 0 8px 32px rgba(99, 102, 241, 0.35);
-}
-
-.roles-page.theme-light {
-  --card-bg: rgba(255, 255, 255, 0.9);
   --card-bg-subtle: rgba(0, 0, 0, 0.02);
-  --card-border: rgba(0, 0, 0, 0.08);
   --card-border-hover: rgba(0, 0, 0, 0.14);
   --surface-bg: rgba(255, 255, 255, 0.8);
-  --dialog-bg: #ffffff;
   --dialog-border: rgba(0, 0, 0, 0.1);
   --dialog-footer-bg: rgba(0, 0, 0, 0.03);
   --input-bg: rgba(0, 0, 0, 0.03);
@@ -1064,10 +1153,8 @@ onMounted(async () => {
   --hover-bg-strong: rgba(0, 0, 0, 0.08);
   --text-heading: #1e293b;
   --text-body: #334155;
-  --text-secondary: #64748b;
   --text-muted: #94a3b8;
   --border-line: rgba(0, 0, 0, 0.06);
-  --status-ring: #ffffff;
   --grad-base-start: #f8f9fe;
   --grad-base-end: #f1f3f9;
   --grid-line: rgba(0, 0, 0, 0.03);
@@ -1076,7 +1163,39 @@ onMounted(async () => {
   --shadow-btn: 0 8px 32px rgba(99, 102, 241, 0.2);
 }
 
-/* Page Layout */
+.roles-page.dark-mode {
+  --card-bg: rgba(30, 30, 46, 0.82);
+  --card-border: rgba(255, 255, 255, 0.06);
+  --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --hover-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --bg-subtle: rgba(255, 255, 255, 0.03);
+  --dialog-bg: #1e1e2e;
+
+  --card-bg-subtle: rgba(255, 255, 255, 0.03);
+  --card-border-hover: rgba(255, 255, 255, 0.15);
+  --surface-bg: rgba(30, 30, 46, 0.5);
+  --dialog-border: rgba(255, 255, 255, 0.1);
+  --dialog-footer-bg: rgba(0, 0, 0, 0.2);
+  --input-bg: rgba(255, 255, 255, 0.05);
+  --hover-bg: rgba(255, 255, 255, 0.05);
+  --hover-bg-strong: rgba(255, 255, 255, 0.1);
+  --text-heading: #f8fafc;
+  --text-body: #e2e8f0;
+  --text-muted: #64748b;
+  --border-line: rgba(255, 255, 255, 0.06);
+  --grad-base-start: #0f0f1a;
+  --grad-base-end: #1a1a2e;
+  --grid-line: rgba(255, 255, 255, 0.02);
+  --shape-opacity: 0.4;
+  --shadow-card: 0 8px 24px rgba(0, 0, 0, 0.2);
+  --shadow-btn: 0 8px 32px rgba(99, 102, 241, 0.35);
+}
+
+/* ============================================
+   PAGE LAYOUT
+   ============================================ */
 .roles-page {
   position: relative;
   min-height: 100vh;
@@ -1084,7 +1203,9 @@ onMounted(async () => {
   overflow-x: hidden;
 }
 
-/* Animated Background */
+/* ============================================
+   ANIMATED BACKGROUND
+   ============================================ */
 .page-bg {
   position: fixed;
   inset: 0;
@@ -1160,7 +1281,9 @@ onMounted(async () => {
   66% { transform: translate(-20px, 20px) scale(0.95); }
 }
 
-/* Header */
+/* ============================================
+   HEADER
+   ============================================ */
 .page-header {
   margin-bottom: 32px;
 }
@@ -1221,7 +1344,9 @@ onMounted(async () => {
   box-shadow: 0 12px 40px rgba(99, 102, 241, 0.45);
 }
 
-/* Stats Grid */
+/* ============================================
+   STATS GRID
+   ============================================ */
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -1234,18 +1359,20 @@ onMounted(async () => {
   background: var(--card-bg);
   backdrop-filter: blur(20px);
   border: 1px solid var(--card-border);
-  border-radius: 20px;
+  border-radius: 16px;
   padding: 24px;
   display: flex;
   align-items: center;
   gap: 16px;
   overflow: hidden;
   transition: all 0.3s ease;
+  box-shadow: var(--card-shadow);
 }
 
 .stat-card:hover {
-  transform: translateY(-4px);
+  transform: translateY(-2px);
   border-color: var(--card-border-hover);
+  box-shadow: var(--hover-shadow);
 }
 
 .stat-icon {
@@ -1260,22 +1387,22 @@ onMounted(async () => {
 
 .stat-total .stat-icon {
   background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(139, 92, 246, 0.2));
-  color: var(--primary-light);
+  color: #818cf8;
 }
 
 .stat-permissions .stat-icon {
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.2), rgba(249, 115, 22, 0.2));
-  color: #fbbf24;
-}
-
-.stat-active .stat-icon {
   background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(6, 182, 212, 0.2));
   color: #34d399;
 }
 
 .stat-popular .stat-icon {
-  background: linear-gradient(135deg, rgba(236, 72, 153, 0.2), rgba(168, 85, 247, 0.2));
-  color: #f472b6;
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(168, 85, 247, 0.2));
+  color: #a78bfa;
+}
+
+.stat-active .stat-icon {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.2), rgba(249, 115, 22, 0.2));
+  color: #fbbf24;
 }
 
 .stat-content {
@@ -1289,13 +1416,13 @@ onMounted(async () => {
   font-weight: 700;
   color: var(--text-heading);
   line-height: 1;
+}
+
+.stat-value-text {
+  font-size: 18px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.stat-popular .stat-value {
-  font-size: 18px;
 }
 
 .stat-label {
@@ -1319,55 +1446,38 @@ onMounted(async () => {
 }
 
 .stat-permissions .stat-decoration {
-  background: linear-gradient(135deg, #f59e0b, #f97316);
-}
-
-.stat-active .stat-decoration {
   background: linear-gradient(135deg, #10b981, #06b6d4);
 }
 
 .stat-popular .stat-decoration {
-  background: linear-gradient(135deg, #ec4899, #a855f7);
+  background: linear-gradient(135deg, #8b5cf6, #a855f7);
 }
 
-/* Filters */
-.filters-card {
+.stat-active .stat-decoration {
+  background: linear-gradient(135deg, #f59e0b, #f97316);
+}
+
+/* ============================================
+   SEARCH BAR
+   ============================================ */
+.search-card {
   background: var(--card-bg);
   backdrop-filter: blur(20px);
   border: 1px solid var(--card-border);
-  border-radius: 20px;
+  border-radius: 16px;
   padding: 20px;
   margin-bottom: 28px;
+  box-shadow: var(--card-shadow);
 }
 
-.filters-header {
+.search-wrapper {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  margin-bottom: 16px;
-}
-
-.filter-icon {
-  color: var(--primary-light);
-}
-
-.filters-body {
-  display: flex;
   gap: 16px;
-  flex-wrap: wrap;
 }
 
-.filter-item {
+.search-input {
   flex: 1;
-  min-width: 200px;
-}
-
-.search-filter {
-  flex: 2;
-  min-width: 280px;
 }
 
 .search-input :deep(.v-field) {
@@ -1379,13 +1489,22 @@ onMounted(async () => {
   color: var(--text-secondary);
 }
 
-.clear-btn {
-  height: 48px !important;
-  border-radius: 12px !important;
+.search-info {
   flex-shrink: 0;
 }
 
-/* Roles Container */
+.results-count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--input-bg);
+  padding: 6px 14px;
+  border-radius: 20px;
+}
+
+/* ============================================
+   ROLES CONTAINER
+   ============================================ */
 .roles-container {
   background: var(--surface-bg);
   backdrop-filter: blur(20px);
@@ -1393,6 +1512,7 @@ onMounted(async () => {
   border-radius: 24px;
   padding: 24px;
   min-height: 400px;
+  box-shadow: var(--card-shadow);
 }
 
 /* Loading State */
@@ -1456,25 +1576,31 @@ onMounted(async () => {
   margin: 0;
 }
 
-/* Roles Grid */
+/* ============================================
+   ROLES GRID
+   ============================================ */
 .roles-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   gap: 20px;
 }
 
-/* Role Card */
+/* ============================================
+   ROLE CARD
+   ============================================ */
 .role-card {
   position: relative;
-  background: var(--card-bg-subtle);
+  background: var(--card-bg);
+  backdrop-filter: blur(20px);
   border: 1px solid var(--card-border);
-  border-radius: 20px;
+  border-radius: 16px;
   padding: 24px;
   transition: all 0.3s ease;
   animation: cardFadeIn 0.5s ease forwards;
   animation-delay: var(--delay);
   opacity: 0;
   transform: translateY(20px);
+  box-shadow: var(--card-shadow);
 }
 
 @keyframes cardFadeIn {
@@ -1487,6 +1613,7 @@ onMounted(async () => {
 .role-card:hover {
   border-color: rgba(99, 102, 241, 0.3);
   transform: translateY(-4px);
+  box-shadow: var(--hover-shadow);
 }
 
 .role-card:hover .card-glow {
@@ -1497,7 +1624,7 @@ onMounted(async () => {
   position: absolute;
   inset: -1px;
   background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), transparent, rgba(139, 92, 246, 0.15));
-  border-radius: 20px;
+  border-radius: 16px;
   opacity: 0;
   transition: opacity 0.3s ease;
   z-index: -1;
@@ -1529,6 +1656,12 @@ onMounted(async () => {
   min-width: 0;
 }
 
+.role-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .role-name {
   font-size: 17px;
   font-weight: 600;
@@ -1539,14 +1672,28 @@ onMounted(async () => {
   text-overflow: ellipsis;
 }
 
-.role-slug {
-  font-size: 14px;
-  color: var(--text-secondary);
-  margin: 2px 0 0;
+.default-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  flex-shrink: 0;
+}
+
+.slug-badge {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid;
   font-family: monospace;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  margin-top: 4px;
 }
 
 .menu-btn {
@@ -1595,28 +1742,60 @@ onMounted(async () => {
   overflow: hidden;
 }
 
-/* Permissions Count */
-.role-permissions-info {
+/* Role Stats */
+.role-stats {
   display: flex;
-  gap: 20px;
+  gap: 16px;
   margin-bottom: 16px;
 }
 
-.permission-count,
-.user-count {
+.role-stat {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  color: var(--text-muted);
+  gap: 10px;
+  flex: 1;
+  padding: 10px 14px;
+  background: var(--bg-subtle);
+  border-radius: 10px;
+  border: 1px solid var(--border-line);
 }
 
-.permission-count .v-icon {
-  color: var(--primary-light);
+.role-stat-icon {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  flex-shrink: 0;
 }
 
-.user-count .v-icon {
+.role-stat-icon.users-icon {
+  background: rgba(99, 102, 241, 0.12);
+  color: #818cf8;
+}
+
+.role-stat-icon.perms-icon {
+  background: rgba(16, 185, 129, 0.12);
   color: #34d399;
+}
+
+.role-stat-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.role-stat-value {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-heading);
+  line-height: 1;
+}
+
+.role-stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
 }
 
 /* Role Footer */
@@ -1628,14 +1807,12 @@ onMounted(async () => {
   border-top: 1px solid var(--border-line);
 }
 
-.role-badge {
+.footer-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
-  font-weight: 600;
-  padding: 6px 12px;
-  border-radius: 8px;
-  border: 1px solid;
-  letter-spacing: 0.3px;
-  font-family: monospace;
+  color: var(--text-muted);
 }
 
 .permissions-btn {
@@ -1654,7 +1831,9 @@ onMounted(async () => {
   border-top: 1px solid var(--border-line);
 }
 
-/* Pagination */
+/* ============================================
+   PAGINATION
+   ============================================ */
 .pagination-container {
   display: flex;
   justify-content: space-between;
@@ -1711,10 +1890,13 @@ onMounted(async () => {
   padding: 0 8px;
 }
 
-/* Dialogs */
+/* ============================================
+   DIALOGS
+   ============================================ */
 .custom-dialog :deep(.v-overlay__content) {
   margin: 16px;
 }
+
 .custom-dialog :deep(.v-overlay__scrim) {
   background: rgba(0, 0, 0, 0.7) !important;
 }
@@ -1724,9 +1906,11 @@ onMounted(async () => {
   border-radius: 24px !important;
   overflow: hidden;
 }
+
 .dialog-card.v-card {
   background: var(--dialog-bg) !important;
 }
+
 .dialog-card :deep(.v-card__overlay) {
   display: none;
 }
@@ -1837,7 +2021,9 @@ onMounted(async () => {
   background: linear-gradient(135deg, #3b82f6, #6366f1) !important;
 }
 
-/* Delete Dialog */
+/* ============================================
+   DELETE DIALOG
+   ============================================ */
 .delete-dialog {
   text-align: center;
 }
@@ -1846,7 +2032,7 @@ onMounted(async () => {
   padding: 32px 24px;
 }
 
-.delete-icon {
+.delete-icon-wrapper {
   width: 80px;
   height: 80px;
   display: flex;
@@ -1888,14 +2074,34 @@ onMounted(async () => {
   margin: 0;
 }
 
+.delete-warning.error-warning {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.1);
+}
+
 .delete-footer {
   justify-content: center;
 }
 
-/* Permissions Dialog */
+/* ============================================
+   PERMISSIONS DIALOG
+   ============================================ */
 .permissions-body {
   max-height: 60vh;
   overflow-y: auto;
+}
+
+.permissions-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.permissions-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.permissions-body::-webkit-scrollbar-thumb {
+  background: var(--text-muted);
+  border-radius: 3px;
 }
 
 .permissions-grid {
@@ -1909,6 +2115,11 @@ onMounted(async () => {
   border: 1px solid var(--card-border);
   border-radius: 16px;
   overflow: hidden;
+  transition: border-color 0.2s ease;
+}
+
+.permission-module:hover {
+  border-color: var(--card-border-hover);
 }
 
 .module-header {
@@ -1937,9 +2148,12 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(139, 92, 246, 0.15));
   border-radius: 10px;
-  color: var(--primary-light);
+  transition: transform 0.2s ease;
+}
+
+.module-header:hover .module-icon {
+  transform: scale(1.05);
 }
 
 .module-name {
@@ -1989,17 +2203,21 @@ onMounted(async () => {
   min-width: 0;
 }
 
-.permission-name {
+.permission-codename {
   font-size: 14px;
   font-weight: 500;
   color: var(--text-body);
   font-family: monospace;
 }
 
-.permission-desc {
+.permission-label {
   font-size: 12px;
   color: var(--text-muted);
   margin-top: 2px;
+}
+
+.permissions-footer {
+  flex-wrap: wrap;
 }
 
 .footer-info {
@@ -2011,12 +2229,20 @@ onMounted(async () => {
   font-weight: 600;
 }
 
+.changes-indicator {
+  color: #f59e0b;
+  font-weight: 500;
+  font-style: italic;
+}
+
 .footer-actions {
   display: flex;
   gap: 12px;
 }
 
-/* Mobile Responsive */
+/* ============================================
+   RESPONSIVE
+   ============================================ */
 @media (max-width: 1200px) {
   .stats-grid {
     grid-template-columns: repeat(2, 1fr);
@@ -2054,16 +2280,13 @@ onMounted(async () => {
     font-size: 22px;
   }
 
-  .filters-body {
+  .search-wrapper {
     flex-direction: column;
+    gap: 12px;
   }
 
-  .filter-item {
-    min-width: 100%;
-  }
-
-  .search-filter {
-    min-width: 100%;
+  .search-info {
+    align-self: flex-end;
   }
 
   .roles-grid {
@@ -2108,13 +2331,13 @@ onMounted(async () => {
     flex-wrap: wrap;
   }
 
-  .footer-info {
+  .permissions-footer .footer-info {
     width: 100%;
     justify-content: center;
     margin-bottom: 8px;
   }
 
-  .footer-actions {
+  .permissions-footer .footer-actions {
     width: 100%;
     justify-content: flex-end;
   }
@@ -2134,6 +2357,11 @@ onMounted(async () => {
 
   .stats-grid {
     grid-template-columns: 1fr;
+  }
+
+  .role-stats {
+    flex-direction: column;
+    gap: 8px;
   }
 
   .page-numbers {

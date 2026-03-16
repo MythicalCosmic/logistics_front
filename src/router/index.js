@@ -7,7 +7,7 @@ const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     { path: '/', redirect: '/dashboard' },
-    
+
     // Default layout (authenticated pages)
     {
       path: '/',
@@ -64,9 +64,18 @@ const router = createRouter({
             permissions: ['analytics.view'],
           },
         },
+        {
+          path: 'activity-logs',
+          name: 'activity-logs',
+          component: () => import('../pages/activity-logs.vue'),
+          meta: {
+            requiresAuth: true,
+            permissions: ['reports.view'],
+          },
+        },
       ],
     },
-    
+
     // Blank layout (guest pages)
     {
       path: '/',
@@ -78,12 +87,6 @@ const router = createRouter({
           component: () => import('../pages/login.vue'),
           meta: { requiresAuth: false },
         },
-        // {
-        //   path: 'not-authorized',
-        //   name: 'not-authorized',
-        //   component: () => import('../pages/not-authorized.vue'),
-        //   meta: { requiresAuth: false },
-        // },
         {
           path: ':pathMatch(.*)*',
           name: 'not-found',
