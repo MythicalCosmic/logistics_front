@@ -104,8 +104,24 @@ const toggleLoadExpand = (loadId) => {
   expandedLoadId.value = expandedLoadId.value === loadId ? null : loadId
 }
 
-const toggleGroupExpand = (groupId) => {
-  expandedGroups.value = { ...expandedGroups.value, [groupId]: !expandedGroups.value[groupId] }
+const toggleGroupExpand = async (groupId) => {
+  const wasExpanded = expandedGroups.value[groupId]
+  expandedGroups.value = { ...expandedGroups.value, [groupId]: !wasExpanded }
+
+  // Fetch loads for this route if expanding and not already loaded
+  if (!wasExpanded) {
+    const group = groupedRoutes.value.find(g => g.route_id === groupId)
+    if (group && !group.loads) {
+      try {
+        const response = await api.get(`/api/routes/${groupId}/loads`, { params: { per_page: 50 } })
+        if (response.data.success) {
+          group.loads = response.data.data?.loads || []
+        }
+      } catch {
+        group.loads = []
+      }
+    }
+  }
 }
 
 // Grouped data from backend
@@ -1058,6 +1074,12 @@ onMounted(() => {
 
           <!-- Expanded group loads -->
           <div v-if="expandedGroups[group.route_id]" class="group-loads">
+            <div v-if="!group.loads" class="d-flex justify-center pa-6">
+              <VProgressCircular indeterminate color="primary" size="28" />
+            </div>
+            <div v-else-if="!group.loads.length" class="text-center pa-6" style="color: var(--text-secondary);">
+              No loads found for this route
+            </div>
             <div
               v-for="(load, index) in group.loads"
               :key="load.id"

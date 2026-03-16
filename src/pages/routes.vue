@@ -15,6 +15,14 @@ const isDark = computed(() => vuetifyTheme.global.current.value.dark)
 // Permissions
 const canView = computed(() => authStore.hasPermission('loads.view'))
 
+// Solid dialog background (VDialog teleports outside scoped component)
+const dialogCardStyle = computed(() => ({
+  background: isDark.value ? '#1e1e2e' : '#ffffff',
+  color: isDark.value ? '#e2e8f0' : '#1e293b',
+  border: `1px solid ${isDark.value ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'}`,
+  borderRadius: '16px',
+}))
+
 // Sort options
 const sortOptions = [
   { title: 'Most Loads', value: '-load_count' },
@@ -416,7 +424,7 @@ onMounted(() => {
 
     <!-- Route Detail Dialog -->
     <VDialog v-model="showDetailDialog" max-width="900" scrollable>
-      <VCard class="dialog-card">
+      <VCard :style="dialogCardStyle">
         <!-- Header -->
         <VCardTitle class="d-flex align-center pa-5 pb-3" style="gap: 12px;">
           <div class="dialog-icon route">
